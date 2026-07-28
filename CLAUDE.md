@@ -162,7 +162,8 @@ covered graded per student, a free-text summary, and inline homework (see
 below) · Book a slot also surfaces fixed classes with a spare seat, not
 just dedicated ad-hoc sessions (see below) · families can propose a custom
 day/time nothing else covers, admin accepts and schedules it or declines
-(see below).
+(see below) · Progress shows a tab per subject for a student tracked in
+more than one.
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -203,6 +204,15 @@ it `declined` — no session, no booking. `sessionForm` gained a real
 `tutor_id` picker for this (it only ever had a free-text `tutor_name`
 before) — allocating a tutor needs to be a real account link, or the
 tutor would never see the lesson on their own dashboard.
+
+**Progress subject tabs.** `progressBlock` (shared by admin and family
+views) derives the tab list from `topic_mastery` itself — whichever
+subjects a student actually has a tracked topic in, not every subject the
+centre offers. Tabs are hidden entirely when a student only has one
+subject, to avoid a pointless single tab. Switching tabs (`state.
+progressSubject`) filters both the topic-by-topic bars and the recent
+graded work table together, so "Average score" and "Topics tracked"
+always describe the selected subject, not the student's whole record.
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a

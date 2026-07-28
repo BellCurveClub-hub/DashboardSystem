@@ -34,6 +34,7 @@ function fixtures() {
     topics: [
       { id: "tp1", subject_id: "sub1", level: "Sec 3 G3", name: "Quadratic equations", sort_order: 1 },
       { id: "tp2", subject_id: "sub1", level: "Sec 3 G3", name: "Trigonometry", sort_order: 2 },
+      { id: "tp3", subject_id: "sub2", level: "Sec 3 G3", name: "Chemical bonding", sort_order: 1 },
     ],
     classes: [
       { id: "cl1", name: "Sec 3 G3 A-Math", subject_id: "sub1", level: "Sec 3 G3", tutor_name: "Mr Lim", room: "R1",
@@ -104,6 +105,7 @@ function fixtures() {
     topic_mastery: [
       { student_id: "st1", topic_id: "tp1", score: 88, samples: 3, manual_score: null, updated_at: new Date().toISOString() },
       { student_id: "st1", topic_id: "tp2", score: 61, samples: 2, manual_score: null, updated_at: new Date().toISOString() },
+      { student_id: "st1", topic_id: "tp3", score: 74, samples: 2, manual_score: null, updated_at: new Date().toISOString() },
     ],
     grading_scales: [
       { id: "gs1", name: "O-Level / Express", note: "A1 to F9", sort_order: 1, is_active: true },
@@ -405,6 +407,18 @@ async function runRole(roleName, userId, empty) {
     const btxt = w.document.querySelector("#view").textContent;
     check("open fixed class with a spare seat shows up in Book a slot", /Sec 3 G3 A-Math \(Fri\)/.test(btxt));
     check("shows how many seats are left", /3 seats left/.test(btxt));
+
+    // --- progress: subject tabs for a student with more than one subject ---
+    w.location.hash = "#/progress"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    check("subject tabs render for a student with 2+ subjects",
+      !!w.document.querySelector('[data-act="progress-subject-tab"][data-v="sub2"]'));
+    let progTxt = w.document.querySelector("#view").textContent;
+    check("all-subjects view shows topics from every subject", /Trigonometry/.test(progTxt) && /Chemical bonding/.test(progTxt));
+    w.document.querySelector('[data-act="progress-subject-tab"][data-v="sub2"]').click();
+    await new Promise(r => setTimeout(r, 80));
+    progTxt = w.document.querySelector("#view").textContent;
+    check("selecting a subject tab filters to just that subject",
+      /Chemical bonding/.test(progTxt) && !/Trigonometry/.test(progTxt));
 
     w.location.hash = "#/billing"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
     const p = w.document.querySelector('[data-act="print-invoice"]');

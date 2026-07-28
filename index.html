@@ -2102,6 +2102,7 @@ const state = {
   counts: {},
   settings: {},
   phoneCodeSent: false,
+  progressSubject: "all",
 };
 
 /* ---------------------------------------------------------------- helpers -- */
@@ -3807,8 +3808,23 @@ ADMIN.progress = async function (view) {
 
 function progressBlock(student, mastery, topics, subjects, hw, att, isAdmin) {
   const tmap = byId(topics), smap = byId(subjects);
-  const mrows = mastery.slice().sort((a, b) => (a.manual_score || a.score) - (b.manual_score || b.score));
+
+  // only subjects this student actually has topic scores in get a tab
+  const subjectIds = [...new Set(mastery.map(m => (tmap[m.topic_id] || {}).subject_id).filter(Boolean))];
+  const subjectTabs = subjectIds.map(id => smap[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+  if (state.progressSubject !== "all" && !subjectIds.includes(state.progressSubject)) state.progressSubject = "all";
+  const activeSubject = state.progressSubject;
+
+  const inSubject = topicId => activeSubject === "all" || (tmap[topicId] || {}).subject_id === activeSubject;
+  const mrows = mastery.filter(m => inSubject(m.topic_id)).sort((a, b) => (a.manual_score || a.score) - (b.manual_score || b.score));
+  const hwInSubject = hw.filter(h => inSubject(h.topic_id));
   const present = att.filter(a => a.status === "present" || a.status === "late").length;
+
+  const tabsBar = subjectTabs.length > 1 ? '<div class="filters">' +
+    '<button class="kid-tab" aria-selected="' + (activeSubject === "all") + '" data-act="progress-subject-tab" data-v="all">All subjects</button>' +
+    subjectTabs.map(sub => '<button class="kid-tab" aria-selected="' + (activeSubject === sub.id) +
+      '" data-act="progress-subject-tab" data-v="' + sub.id + '">' + esc(sub.name) + "</button>").join("") +
+    "</div>" : "";
 
   const bars = mrows.map(m => {
     const t = tmap[m.topic_id] || {};
@@ -3824,18 +3840,19 @@ function progressBlock(student, mastery, topics, subjects, hw, att, isAdmin) {
       "</div>";
   }).join("");
 
-  const avg = hw.length ? Math.round(hw.reduce((a, h) => a + pct(h.score, h.max_score), 0) / hw.length) : null;
+  const avg = hwInSubject.length ? Math.round(hwInSubject.reduce((a, h) => a + pct(h.score, h.max_score), 0) / hwInSubject.length) : null;
 
-  const hwRows = hw.slice(0, 15).map(h =>
+  const hwRows = hwInSubject.slice(0, 15).map(h =>
     "<tr><td>" + esc(h.title) + "</td><td>" + esc(nameOf(tmap, h.topic_id, "—")) + "</td>" +
     "<td>" + esc(fmtDate(h.graded_at)) + "</td>" +
     '<td class="num"><b>' + pct(h.score, h.max_score) + "%</b></td>" +
     "<td>" + esc(h.feedback || "") + "</td></tr>");
 
-  return '<div class="cols cols-3" style="margin-bottom:18px">' +
-      '<div class="stat"><div class="k">Average score</div><div class="v">' + (avg === null ? "—" : avg + "%") + '</div><div class="n">across ' + hw.length + " graded tasks</div></div>" +
+  return tabsBar +
+    '<div class="cols cols-3" style="margin-bottom:18px">' +
+      '<div class="stat"><div class="k">Average score</div><div class="v">' + (avg === null ? "—" : avg + "%") + '</div><div class="n">across ' + hwInSubject.length + " graded tasks</div></div>" +
       '<div class="stat"><div class="k">Lessons attended</div><div class="v">' + present + '</div><div class="n">of ' + att.length + " marked</div></div>" +
-      '<div class="stat"><div class="k">Topics tracked</div><div class="v">' + mastery.length + '</div><div class="n">weakest shown first</div></div>' +
+      '<div class="stat"><div class="k">Topics tracked</div><div class="v">' + mrows.length + '</div><div class="n">weakest shown first</div></div>' +
     "</div>" +
     card("Topic by topic",
       mrows.length ? '<div class="mastery">' + bars + "</div>"
@@ -5384,6 +5401,7 @@ const ACTIONS = {
   },
   "record-payment": el => paymentForm(el.dataset.id),
   "inv-filter": el => { state.invFilter = el.dataset.v; render(); },
+  "progress-subject-tab": el => { state.progressSubject = el.dataset.v; render(); },
   "print-invoice": el => showInvoiceDoc(el.dataset.id),
   "do-print": () => window.print(),
   "close-print": () => closePrint(),
