@@ -8,10 +8,12 @@ const { JSDOM, VirtualConsole } = require("jsdom");
 const EMPTY = process.env.EMPTY === "1" || process.argv.includes("--empty");
 const PAGE = path.join(__dirname, "..", "index.html");
 
-const D = () => {
-  const d = new Date(); return d.toISOString().slice(0, 10);
-};
-const plus = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+// local Y-M-D, matching the app's own iso()/today() — not toISOString(),
+// which is UTC and drifts a day off local dates for part of every day
+// outside UTC (this broke "today"-dated fixture sessions under UTC+8).
+const isoLocal = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const D = () => isoLocal(new Date());
+const plus = n => { const d = new Date(); d.setDate(d.getDate() + n); return isoLocal(d); };
 
 const UID = { admin: "u-admin", tutor: "u-tutor", parent: "u-parent", student: "u-student", pendingTutor: "u-pending-tutor" };
 
@@ -25,28 +27,38 @@ function fixtures() {
       { id: UID.pendingTutor, role: "pending_tutor", full_name: "Ms Goh", email: "goh@x.sg", phone: "9444 4444", is_active: true },
     ],
     students: [
-      { id: "st1", profile_id: UID.student, parent_id: UID.parent, full_name: "Tan Wei Ling", level: "Sec 3 G3",
+      { id: "st1", profile_id: UID.student, parent_id: UID.parent, full_name: "Tan Wei Ling", level_id: "lv3",
         school: "Bedok View", credits: 5, points: 340, low_credit_at: 2, notes: "", is_active: true },
-      { id: "st2", profile_id: null, parent_id: UID.parent, full_name: "Tan Wei Jie", level: "Sec 1 G2",
+      { id: "st2", profile_id: null, parent_id: UID.parent, full_name: "Tan Wei Jie", level_id: "lv1",
         school: "Bedok View", credits: 1, points: 80, low_credit_at: 2, notes: "", is_active: true },
     ],
     subjects: [{ id: "sub1", name: "Mathematics", colour: "#12707F" }, { id: "sub2", name: "Science", colour: "#2F7D4F" }],
+    levels: [
+      { id: "lv1", name: "Sec 1", sort_order: 1 },
+      { id: "lv2", name: "Sec 2", sort_order: 2 },
+      { id: "lv3", name: "Sec 3", sort_order: 3 },
+    ],
+    streams: [
+      { id: "sm1", name: "G1", sort_order: 1 },
+      { id: "sm2", name: "G2", sort_order: 2 },
+      { id: "sm3", name: "G3", sort_order: 3 },
+    ],
     topics: [
-      { id: "tp1", subject_id: "sub1", level: "Sec 3 G3", name: "Quadratic equations", sort_order: 1 },
-      { id: "tp2", subject_id: "sub1", level: "Sec 3 G3", name: "Trigonometry", sort_order: 2 },
-      { id: "tp3", subject_id: "sub2", level: "Sec 3 G3", name: "Chemical bonding", sort_order: 1 },
+      { id: "tp1", subject_id: "sub1", level_id: "lv3", name: "Quadratic equations", sort_order: 1 },
+      { id: "tp2", subject_id: "sub1", level_id: "lv3", name: "Trigonometry", sort_order: 2 },
+      { id: "tp3", subject_id: "sub2", level_id: "lv3", name: "Chemical bonding", sort_order: 1 },
     ],
     classes: [
-      { id: "cl1", name: "Sec 3 G3 A-Math", subject_id: "sub1", level: "Sec 3 G3", tutor_name: "Mr Lim", room: "R1",
+      { id: "cl1", name: "Sec 3 G3 A-Math", subject_id: "sub1", level_id: "lv3", stream_id: "sm3", tutor_name: "Mr Lim", room: "R1",
         kind: "fixed", day_of_week: new Date().getDay(), start_time: "16:00", end_time: "17:30", capacity: 8,
         credits_per_session: 1, is_active: true, tutor_id: UID.tutor },
-      { id: "cl2", name: "Makeup slots", subject_id: "sub1", level: "Any", tutor_name: "Mr Lim", room: "R2",
+      { id: "cl2", name: "Makeup slots", subject_id: "sub1", level_id: "lv3", stream_id: "sm3", tutor_name: "Mr Lim", room: "R2",
         kind: "adhoc", day_of_week: null, start_time: null, end_time: null, capacity: 4,
         credits_per_session: 1, is_active: true, tutor_id: UID.tutor },
-      { id: "cl3", name: "Someone else's class", subject_id: "sub2", level: "Sec 2", tutor_name: "Ms Ong", room: "R3",
+      { id: "cl3", name: "Someone else's class", subject_id: "sub2", level_id: "lv2", stream_id: "sm2", tutor_name: "Ms Ong", room: "R3",
         kind: "fixed", day_of_week: new Date().getDay(), start_time: "19:00", end_time: "20:30", capacity: 6,
         credits_per_session: 1, is_active: true, tutor_id: "u-other" },
-      { id: "cl4", name: "Sec 3 G3 A-Math (Fri)", subject_id: "sub1", level: "Sec 3 G3", tutor_name: "Mr Lim", room: "R1",
+      { id: "cl4", name: "Sec 3 G3 A-Math (Fri)", subject_id: "sub1", level_id: "lv3", stream_id: "sm3", tutor_name: "Mr Lim", room: "R1",
         kind: "fixed", day_of_week: (new Date().getDay() + 1) % 7, start_time: "18:00", end_time: "19:30", capacity: 4,
         credits_per_session: 1, is_active: true, tutor_id: UID.tutor },
     ],

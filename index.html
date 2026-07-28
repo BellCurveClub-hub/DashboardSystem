@@ -1965,6 +1965,105 @@ begin
     d := d + 1;
   end loop;
 end $$;
+
+-- ===========================================================================
+-- PART 8 — Levels and streams as real reference data, not free text
+-- Added after the first release. Safe to run on an existing database.
+--
+-- "Level" (Sec 3, P5, JC1 …) and "stream" (G1, G2, G3 …) used to be a
+-- free-text field typed the same way on classes, students and topics —
+-- "Sec 3 G3" one place, "sec3 g3" another, and an exact-string comparison
+-- silently failing was how a spare seat in a same-subject class stopped
+-- being offered as a drop-in. Centres differ on both lists (a primary
+-- centre has no JC levels; streams are a centre's own naming), so admins
+-- define both here rather than the app hard-coding either. The old
+-- "level" text columns are left in place, unused, rather than dropped —
+-- nothing currently reads them once the app is updated to the *_id
+-- columns below.
+-- ===========================================================================
+create table if not exists levels (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null unique,
+  sort_order int not null default 0
+);
+create table if not exists streams (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null unique,
+  sort_order int not null default 0
+);
+alter table levels  enable row level security;
+alter table streams enable row level security;
+drop policy if exists p_read  on levels;
+drop policy if exists p_write on levels;
+drop policy if exists p_read  on streams;
+drop policy if exists p_write on streams;
+create policy p_read  on levels  for select using (auth.uid() is not null);
+create policy p_write on levels  for all using (is_admin()) with check (is_admin());
+create policy p_read  on streams for select using (auth.uid() is not null);
+create policy p_write on streams for all using (is_admin()) with check (is_admin());
+
+alter table classes  add column if not exists level_id  uuid references levels(id) on delete set null;
+alter table classes  add column if not exists stream_id uuid references streams(id) on delete set null;
+alter table students add column if not exists level_id  uuid references levels(id) on delete set null;
+alter table topics   add column if not exists level_id  uuid references levels(id) on delete set null;
+
+-- request_booking() now also checks, server-side, that a fixed-class
+-- drop-in is the same subject and stream the student already takes
+-- elsewhere — matching what bookableView offers, so the rule can't be
+-- skipped by calling the RPC directly with an arbitrary session id.
+create or replace function request_booking(p_session uuid, p_student uuid) returns text
+language plpgsql security definer set search_path = public as $$
+declare v_sess sessions; v_class classes; v_taken int; v_enrolled int; v_credits numeric; v_status booking_status;
+begin
+  if not (is_admin() or p_student in (select my_student_ids())) then
+    raise exception 'That is not your student.';
+  end if;
+  select * into v_sess from sessions where id = p_session;
+  if v_sess is null then raise exception 'That slot no longer exists.'; end if;
+  if v_sess.status <> 'scheduled' then raise exception 'That lesson has been cancelled.'; end if;
+  if (v_sess.session_date + v_sess.start_time) < now() then raise exception 'That slot has already passed.'; end if;
+
+  select * into v_class from classes where id = v_sess.class_id;
+  select count(*) into v_enrolled from enrolments where class_id = v_sess.class_id and status = 'active';
+
+  -- a fixed class with a spare seat is bookable as a drop-in even when
+  -- is_bookable was never set for it -- that flag still gates ad-hoc slots
+  if v_class.kind = 'fixed' then
+    if exists (select 1 from enrolments where student_id = p_student and class_id = v_sess.class_id and status = 'active') then
+      raise exception 'Already enrolled in this class.';
+    end if;
+    if v_enrolled >= v_class.capacity then raise exception 'That class is full.'; end if;
+    if not exists (
+      select 1 from enrolments e join classes c on c.id = e.class_id
+       where e.student_id = p_student and e.status = 'active'
+         and c.subject_id = v_class.subject_id and c.stream_id is not distinct from v_class.stream_id
+    ) then
+      raise exception 'This student does not already take this subject and stream elsewhere.';
+    end if;
+  elsif not v_sess.is_bookable then
+    raise exception 'That slot is not open for booking.';
+  end if;
+
+  select credits into v_credits from students where id = p_student;
+  if coalesce(v_credits, 0) <= 0 then raise exception 'No lesson credits left — top up first.'; end if;
+
+  select count(*) into v_taken from bookings where session_id = p_session and status = 'confirmed';
+  if v_class.kind = 'fixed' then v_taken := v_taken + v_enrolled; end if;
+
+  if setting_int('booking_auto_confirm', 1) = 1 then
+    v_status := case when v_taken < v_sess.capacity then 'confirmed'::booking_status else 'waitlisted'::booking_status end;
+  else
+    v_status := 'requested';
+  end if;
+
+  insert into bookings (session_id, student_id, status, booked_by)
+  values (p_session, p_student, v_status, auth.uid())
+  on conflict (session_id, student_id)
+    do update set status = v_status, booked_by = auth.uid()
+    where bookings.status = 'cancelled';
+
+  return v_status::text;
+end $$;
 `;
 
 /* ============================================================================
@@ -2849,12 +2948,13 @@ ADMIN.overview = async function (view) {
 /* ------------------------------------------------------------- SCHEDULE ---- */
 ADMIN.schedule = async function (view) {
   const from = state.weekStart, to = addDays(from, 6);
-  const [sessions, classes, bookings] = await Promise.all([
+  const [sessions, classes, bookings, levels] = await Promise.all([
     sel("sessions", q => q.gte("session_date", from).lte("session_date", to).order("start_time")),
     sel("classes", q => q.order("name")),
     sel("bookings", q => q.in("status", ["confirmed", "requested"])),
+    sel("levels"),
   ]);
-  const cmap = byId(classes);
+  const cmap = byId(classes), lvMap = byId(levels);
   const counts = {};
   bookings.forEach(b => (counts[b.session_id] = (counts[b.session_id] || 0) + (b.status === "confirmed" ? 1 : 0)));
 
@@ -2864,11 +2964,12 @@ ADMIN.schedule = async function (view) {
     const day = sessions.filter(s => s.session_date === d);
     const items = day.map(s => {
       const c = cmap[s.class_id] || {};
+      const lv = lvMap[c.level_id];
       return '<div class="sess' + (s.is_bookable ? " adhoc" : "") + (s.status === "cancelled" ? " cancelled" : "") +
         '" data-act="session-detail" data-id="' + s.id + '" tabindex="0">' +
         '<div class="t">' + esc(fmtRange(s.start_time, s.end_time)) + "</div>" +
         '<div class="n">' + esc(c.name || "Class") + "</div>" +
-        '<div class="m">' + esc(c.level || "") + (c.level ? " · " : "") + (counts[s.id] || 0) + "/" + s.capacity + "</div></div>";
+        '<div class="m">' + (lv ? esc(lv.name) + " · " : "") + (counts[s.id] || 0) + "/" + s.capacity + "</div></div>";
     }).join("");
     cols.push('<div class="week-col' + (d === today() ? " today" : "") + '">' +
       '<div class="dh">' + DOW3[i] + " <b>" + fmtDateShort(d) + "</b></div>" + items + "</div>");
@@ -2896,6 +2997,7 @@ async function sessionDetail(id) {
   const s = (await sel("sessions", q => q.eq("id", id)))[0];
   if (!s) return;
   const c = (await sel("classes", q => q.eq("id", s.class_id)))[0] || {};
+  const cLevel = c.level_id ? (await sel("levels", q => q.eq("id", c.level_id)))[0] : null;
   const [bookings, enrols, students, att] = await Promise.all([
     sel("bookings", q => q.eq("session_id", id)),
     sel("enrolments", q => q.eq("class_id", s.class_id).eq("status", "active")),
@@ -2925,7 +3027,7 @@ async function sessionDetail(id) {
     body:
       '<div class="row" style="margin-bottom:14px">' +
         '<span class="pill ink">' + esc(fmtRange(s.start_time, s.end_time)) + "</span>" +
-        '<span class="pill">' + esc(c.level || "—") + "</span>" +
+        '<span class="pill">' + esc(cLevel ? cLevel.name : "—") + "</span>" +
         '<span class="pill">' + esc(s.tutor_name || c.tutor_name || "Tutor TBC") + "</span>" +
         '<span class="pill">' + esc(s.room || c.room || "Room TBC") + "</span>" +
         (s.is_bookable ? '<span class="pill hl">Open slot</span>' : "") +
@@ -2950,11 +3052,13 @@ async function sessionDetail(id) {
 
 /* --------------------------------------------------------- new/edit slot ---- */
 async function sessionForm(sess) {
-  const [classes, tutors] = await Promise.all([
+  const [classes, tutors, levels] = await Promise.all([
     sel("classes", q => q.eq("is_active", true).order("name")),
     sel("profiles", q => q.in("role", ["tutor", "admin"]).order("full_name")),
+    sel("levels"),
   ]);
-  const opts = classes.map(c => ({ value: c.id, label: c.name + (c.level ? " · " + c.level : "") }));
+  const lvMap = byId(levels);
+  const opts = classes.map(c => ({ value: c.id, label: c.name + (c.level_id && lvMap[c.level_id] ? " · " + lvMap[c.level_id].name : "") }));
   openModal({
     title: sess ? "Edit the slot" : "Add a slot",
     body:
@@ -2996,14 +3100,16 @@ function addMinutesToTime(t, mins) {
 async function scheduleLessonRequest(requestId) {
   const r = (await sel("lesson_requests", q => q.eq("id", requestId)))[0];
   if (!r) return toast("That request no longer exists.", "bad");
-  const [student, subject, classes, tutors] = await Promise.all([
+  const [student, subject, classes, tutors, levels] = await Promise.all([
     sel("students", q => q.eq("id", r.student_id)).then(x => x[0]),
     r.subject_id ? sel("subjects", q => q.eq("id", r.subject_id)).then(x => x[0]) : null,
     sel("classes", q => q.eq("is_active", true).order("name")),
     sel("profiles", q => q.in("role", ["tutor", "admin"]).order("full_name")),
+    sel("levels"),
   ]);
+  const lvMap = byId(levels);
   const opts = classes.slice().sort((a, b) => (b.subject_id === r.subject_id) - (a.subject_id === r.subject_id))
-    .map(c => ({ value: c.id, label: c.name + (c.level ? " · " + c.level : "") }));
+    .map(c => ({ value: c.id, label: c.name + (c.level_id && lvMap[c.level_id] ? " · " + lvMap[c.level_id].name : "") }));
 
   openModal({
     title: "Schedule " + (subject ? subject.name : "a lesson") + " for " + (student ? student.full_name : "—"),
@@ -3111,13 +3217,16 @@ ADMIN.bookings = async function (view) {
 /* ----------------------------------------------------------- ATTENDANCE ---- */
 ADMIN.attendance = async function (view) {
   const d = state.attDate;
-  const sessions = await sel("sessions", q => q.eq("session_date", d).order("start_time"));
-  const classes = byId(await sel("classes"));
+  const [sessions, classesList, levels] = await Promise.all([
+    sel("sessions", q => q.eq("session_date", d).order("start_time")),
+    sel("classes"), sel("levels"),
+  ]);
+  const classes = byId(classesList), lvMap = byId(levels);
 
   const rows = sessions.map(s => {
     const c = classes[s.class_id] || {};
     return "<tr><td><b>" + esc(fmtRange(s.start_time, s.end_time)) + "</b></td>" +
-      "<td>" + esc(c.name || "—") + "</td><td>" + esc(c.level || "—") + "</td>" +
+      "<td>" + esc(c.name || "—") + "</td><td>" + esc(nameOf(lvMap, c.level_id, "—")) + "</td>" +
       "<td>" + esc(s.tutor_name || c.tutor_name || "—") + "</td>" +
       '<td class="act"><button class="btn btn-sm btn-mint" data-act="take-attendance" data-id="' + s.id + '">Mark the register</button></td></tr>';
   });
@@ -3272,10 +3381,11 @@ async function attendanceSheet(sessionId) {
 
 /* -------------------------------------------------------------- STUDENTS ---- */
 ADMIN.students = async function (view) {
-  const all = await sel("students", q => q.order("full_name"));
+  const [all, levels] = await Promise.all([sel("students", q => q.order("full_name")), sel("levels", q => q.order("sort_order"))]);
+  const lvMap = byId(levels);
   const term = (state.studentSearch || "").trim().toLowerCase();
   const students = term
-    ? all.filter(s => (s.full_name + " " + (s.level || "") + " " + (s.school || "")).toLowerCase().includes(term))
+    ? all.filter(s => (s.full_name + " " + nameOf(lvMap, s.level_id, "") + " " + (s.school || "")).toLowerCase().includes(term))
     : all;
   const parents = await sel("profiles", q => q.eq("role", "parent").order("full_name"));
   const pmap = byId(parents);
@@ -3284,7 +3394,7 @@ ADMIN.students = async function (view) {
     const low = Number(s.credits) <= Number(s.low_credit_at);
     return "<tr><td><b>" + esc(s.full_name) + "</b>" + (s.is_active ? "" : ' <span class="pill">inactive</span>') +
       "<br><span style='color:var(--ink-faint);font-size:12.5px'>" + esc(s.school || "") + "</span></td>" +
-      "<td>" + esc(s.level || "—") + "</td>" +
+      "<td>" + esc(nameOf(lvMap, s.level_id, "—")) + "</td>" +
       "<td>" + esc(pmap[s.parent_id] ? pmap[s.parent_id].full_name : "not linked") + "</td>" +
       '<td class="num"><span class="pill ' + (low ? "bad" : "ok") + '">' + s.credits + "</span></td>" +
       '<td class="num">' + s.points + "</td>" +
@@ -3402,8 +3512,11 @@ ADMIN.tutors = async function (view) {
 
 async function studentForm(id) {
   const s = id ? (await sel("students", q => q.eq("id", id)))[0] : null;
-  const parents = await sel("profiles", q => q.eq("role", "parent").order("full_name"));
-  const kids = await sel("profiles", q => q.eq("role", "student").order("full_name"));
+  const [parents, kids, levels] = await Promise.all([
+    sel("profiles", q => q.eq("role", "parent").order("full_name")),
+    sel("profiles", q => q.eq("role", "student").order("full_name")),
+    sel("levels", q => q.order("sort_order")),
+  ]);
   const pOpts = parents.map(p => ({ value: p.id, label: p.full_name + (p.email ? " · " + p.email : "") }));
   const kOpts = kids.map(p => ({ value: p.id, label: p.full_name + (p.email ? " · " + p.email : "") }));
 
@@ -3412,7 +3525,8 @@ async function studentForm(id) {
     body:
       fText("full_name", "Full name", s ? s.full_name : "", { required: true }) +
       '<div class="grid-2">' +
-        fText("level", "Level", s ? s.level : "", { placeholder: "Sec 3 G3" }) +
+        fSelect("level_id", "Level", s ? s.level_id : "", levels.map(l => ({ value: l.id, label: l.name })),
+          { blank: "—", hint: levels.length ? "" : "Add levels on the Topics page first." }) +
         fText("school", "School", s ? s.school : "") +
       "</div>" +
       fSelect("parent_id", "Parent account", s ? s.parent_id : "", pOpts, { blank: "Not linked yet", hint: "The parent who receives invoices." }) +
@@ -3529,17 +3643,20 @@ async function enrolForm(studentId) {
 
 /* --------------------------------------------------------------- CLASSES ---- */
 ADMIN.classes = async function (view) {
-  const [classes, subjects, enrols] = await Promise.all([
+  const [classes, subjects, enrols, levels, streams] = await Promise.all([
     sel("classes", q => q.order("day_of_week").order("start_time")),
     sel("subjects", q => q.order("name")),
     sel("enrolments", q => q.eq("status", "active")),
+    sel("levels", q => q.order("sort_order")),
+    sel("streams", q => q.order("sort_order")),
   ]);
-  const smap = byId(subjects);
+  const smap = byId(subjects), lvMap = byId(levels), stMap = byId(streams);
   const n = {}; enrols.forEach(e => (n[e.class_id] = (n[e.class_id] || 0) + 1));
 
   const rows = classes.map(c =>
     "<tr><td><b>" + esc(c.name) + "</b>" + (c.is_active ? "" : ' <span class="pill">paused</span>') + "</td>" +
-    "<td>" + esc(nameOf(smap, c.subject_id)) + "</td><td>" + esc(c.level || "—") + "</td>" +
+    "<td>" + esc(nameOf(smap, c.subject_id)) + "</td>" +
+    "<td>" + esc(nameOf(lvMap, c.level_id, "—")) + (c.stream_id ? " " + esc(nameOf(stMap, c.stream_id)) : "") + "</td>" +
     "<td>" + (c.kind === "fixed" && c.day_of_week !== null
       ? esc(DOW3[c.day_of_week] + " " + fmtRange(c.start_time, c.end_time))
       : '<span class="pill hl">ad-hoc</span>') + "</td>" +
@@ -3559,15 +3676,22 @@ ADMIN.classes = async function (view) {
 
 async function classForm(id) {
   const c = id ? (await sel("classes", q => q.eq("id", id)))[0] : null;
-  const subjects = await sel("subjects", q => q.order("name"));
-  const tutors = await sel("profiles", q => q.in("role", ["tutor", "admin"]).order("full_name"));
+  const [subjects, levels, streams, tutors] = await Promise.all([
+    sel("subjects", q => q.order("name")),
+    sel("levels", q => q.order("sort_order")),
+    sel("streams", q => q.order("sort_order")),
+    sel("profiles", q => q.in("role", ["tutor", "admin"]).order("full_name")),
+  ]);
   openModal({
     title: c ? "Edit " + c.name : "Add a class",
     body:
       fText("name", "Class name", c ? c.name : "", { required: true, placeholder: "Sec 3 G3 A-Math" }) +
-      '<div class="grid-2">' +
+      '<div class="grid-3">' +
         fSelect("subject_id", "Subject", c ? c.subject_id : "", subjects.map(s => ({ value: s.id, label: s.name })), { blank: "—" }) +
-        fText("level", "Level", c ? c.level : "", { placeholder: "Sec 3 G3" }) +
+        fSelect("level_id", "Level", c ? c.level_id : "", levels.map(l => ({ value: l.id, label: l.name })), { blank: "—",
+          hint: levels.length ? "" : "Add levels on the Topics page first." }) +
+        fSelect("stream_id", "Stream", c ? c.stream_id : "", streams.map(s => ({ value: s.id, label: s.name })), { blank: "—",
+          hint: streams.length ? "" : "Add streams on the Topics page first." }) +
       "</div>" +
       fSelect("kind", "Type", c ? c.kind : "fixed", [
         { value: "fixed", label: "Fixed weekly class" },
@@ -3592,6 +3716,7 @@ async function classForm(id) {
     onSave: async () => {
       const v = modalValues();
       if (!v.name) return toast("Give the class a name.", "bad");
+      if (!v.level_id || !v.stream_id) return toast("Pick a level and a stream.", "bad");
       if (v.day_of_week !== null && v.day_of_week !== undefined && v.day_of_week !== "") v.day_of_week = Number(v.day_of_week);
       else v.day_of_week = null;
       try {
@@ -3845,12 +3970,12 @@ ADMIN.homework = async function (view) {
 
 async function homeworkForm(id) {
   const h = id ? (await sel("homework", q => q.eq("id", id)))[0] : null;
-  const [students, topics, classes, subjects] = await Promise.all([
+  const [students, topics, classes, subjects, levels] = await Promise.all([
     sel("students", q => q.eq("is_active", true).order("full_name")), sel("topics", q => q.order("sort_order")),
-    sel("classes", q => q.order("name")), sel("subjects"),
+    sel("classes", q => q.order("name")), sel("subjects"), sel("levels"),
   ]);
-  const smap = byId(subjects);
-  const topicOpts = topics.map(t => ({ value: t.id, label: nameOf(smap, t.subject_id) + " · " + (t.level ? t.level + " · " : "") + t.name }));
+  const smap = byId(subjects), lvMap = byId(levels);
+  const topicOpts = topics.map(t => ({ value: t.id, label: nameOf(smap, t.subject_id) + " · " + (t.level_id && lvMap[t.level_id] ? lvMap[t.level_id].name + " · " : "") + t.name }));
 
   openModal({
     title: h ? "Homework — " + h.title : "Assign homework",
@@ -3990,36 +4115,52 @@ function progressBlock(student, mastery, topics, subjects, hw, att, isAdmin) {
 
 /* ---------------------------------------------------------------- TOPICS ---- */
 ADMIN.topics = async function (view) {
-  const [topics, subjects] = await Promise.all([
+  const [topics, subjects, levels, streams] = await Promise.all([
     sel("topics", q => q.order("sort_order")), sel("subjects", q => q.order("name")),
+    sel("levels", q => q.order("sort_order")), sel("streams", q => q.order("sort_order")),
   ]);
+  const lvMap = byId(levels);
   const blocks = subjects.map(s => {
     const list = topics.filter(t => t.subject_id === s.id);
     return card(s.name, list.length
       ? table(["#", "Topic", "Level", ""], list.map(t =>
-          '<tr><td class="num">' + t.sort_order + "</td><td><b>" + esc(t.name) + "</b></td><td>" + esc(t.level || "—") + "</td>" +
+          '<tr><td class="num">' + t.sort_order + "</td><td><b>" + esc(t.name) + "</b></td><td>" + esc(nameOf(lvMap, t.level_id, "Any level")) + "</td>" +
           '<td class="act"><button class="btn btn-sm btn-ghost" data-act="topic-edit" data-id="' + t.id + '">Edit</button> ' +
           '<button class="btn btn-sm btn-danger" data-act="topic-del" data-id="' + t.id + '">Delete</button></td></tr>'))
       : emptyState("◈", "No topics under " + s.name, "Add the chapters you want to score students on."),
       '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '">Add a topic</button>', true);
   }).join("");
 
+  const refRows = (list, editAct, delAct) => list.map(x =>
+    "<tr><td><b>" + esc(x.name) + "</b></td><td class='num'>" + x.sort_order + "</td>" +
+    '<td class="act"><button class="btn btn-sm btn-ghost" data-act="' + editAct + '" data-id="' + x.id + '">Edit</button> ' +
+    '<button class="btn btn-sm btn-danger" data-act="' + delAct + '" data-id="' + x.id + '">Delete</button></td></tr>');
+
   view.innerHTML =
     pageHead("Topics", "The chapters a student's proficiency is scored against",
       '<button class="btn btn-ghost" data-act="subject-add">Add a subject</button>') +
+    '<div class="note">Levels and streams are set up once here, then picked from a dropdown everywhere a class or a student needs one — a class needs a subject, a level and a stream; a student has one level and, through whichever classes they\'re enrolled in, a stream per subject.</div>' +
+    '<div class="cols cols-2">' +
+      card("Levels", levels.length ? table(["Level", { t: "Order", num: true }, ""], refRows(levels, "level-edit", "level-del"))
+        : emptyState("◱", "No levels yet", "e.g. P1–P6, Sec 1–5, JC1–2 — whatever this centre teaches."),
+        '<button class="btn btn-sm btn-mint" data-act="level-edit">Add a level</button>', true) +
+      card("Streams", streams.length ? table(["Stream", { t: "Order", num: true }, ""], refRows(streams, "stream-edit", "stream-del"))
+        : emptyState("◱", "No streams yet", "e.g. G1, G2, G3 — this centre's own grouping."),
+        '<button class="btn btn-sm btn-mint" data-act="stream-edit">Add a stream</button>', true) +
+    "</div>" +
     (subjects.length ? blocks : card("", emptyState("◈", "No subjects yet", "Add a subject first.")));
 };
 
 async function topicForm(id, subjectId) {
   const t = id ? (await sel("topics", q => q.eq("id", id)))[0] : null;
-  const subjects = await sel("subjects", q => q.order("name"));
+  const [subjects, levels] = await Promise.all([sel("subjects", q => q.order("name")), sel("levels", q => q.order("sort_order"))]);
   openModal({
     title: t ? "Edit topic" : "Add a topic",
     body:
       fSelect("subject_id", "Subject", t ? t.subject_id : subjectId || "", subjects.map(s => ({ value: s.id, label: s.name }))) +
       fText("name", "Topic", t ? t.name : "", { required: true, placeholder: "Quadratic equations" }) +
       '<div class="grid-2">' +
-        fText("level", "Level", t ? t.level : "", { placeholder: "Sec 3 G3" }) +
+        fSelect("level_id", "Level", t ? t.level_id : "", levels.map(l => ({ value: l.id, label: l.name })), { blank: "Any level" }) +
         fText("sort_order", "Order", t ? t.sort_order : 0, { type: "number" }) +
       "</div>",
     onSave: async () => {
@@ -4042,6 +4183,40 @@ function subjectForm() {
       const v = modalValues();
       if (!v.name) return toast("Name the subject.", "bad");
       try { await ins("subjects", v); closeModal(); toast("Subject added.", "ok"); render(); } catch (e) { fail(e); }
+    },
+  });
+}
+
+async function levelForm(id) {
+  const l = id ? (await sel("levels", q => q.eq("id", id)))[0] : null;
+  openModal({
+    title: l ? "Edit level" : "Add a level",
+    body: fText("name", "Name", l ? l.name : "", { required: true, placeholder: "Sec 3" }) +
+          fText("sort_order", "Order", l ? l.sort_order : 0, { type: "number" }),
+    onSave: async () => {
+      const v = modalValues();
+      if (!v.name) return toast("Name the level.", "bad");
+      try {
+        if (l) await upd("levels", l.id, v); else await ins("levels", v);
+        closeModal(); toast("Level saved.", "ok"); render();
+      } catch (e) { fail(e); }
+    },
+  });
+}
+
+async function streamForm(id) {
+  const s = id ? (await sel("streams", q => q.eq("id", id)))[0] : null;
+  openModal({
+    title: s ? "Edit stream" : "Add a stream",
+    body: fText("name", "Name", s ? s.name : "", { required: true, placeholder: "G3" }) +
+          fText("sort_order", "Order", s ? s.sort_order : 0, { type: "number" }),
+    onSave: async () => {
+      const v = modalValues();
+      if (!v.name) return toast("Name the stream.", "bad");
+      try {
+        if (s) await upd("streams", s.id, v); else await ins("streams", v);
+        closeModal(); toast("Stream saved.", "ok"); render();
+      } catch (e) { fail(e); }
     },
   });
 }
@@ -4262,8 +4437,12 @@ function sessionCards(list, classes, showActions, studentId) {
 /* --------------------------------------------------------- PARENT: overview -- */
 PARENT.overview = async function (view) {
   if (!state.students.length) return noStudentYet(view);
-  const classes = await sel("classes");
-  const invoices = await sel("invoices", q => q.in("status", ["sent", "draft"]).order("due_at"));
+  const [classes, invoices, levels] = await Promise.all([
+    sel("classes"),
+    sel("invoices", q => q.in("status", ["sent", "draft"]).order("due_at")),
+    sel("levels"),
+  ]);
+  const lvMap = byId(levels);
 
   const blocks = [];
   for (const s of state.students) {
@@ -4280,7 +4459,7 @@ PARENT.overview = async function (view) {
         esc(fmtRange(next.start_time, next.end_time)) + "</p>"
             : "<p class='hint'>Nothing booked in the next two weeks.</p>") +
       '<div class="row"><span class="points-badge">★ ' + s.points + " points</span>" +
-      '<span class="pill">' + esc(s.level || "—") + "</span></div>",
+      '<span class="pill">' + esc(nameOf(lvMap, s.level_id, "—")) + "</span></div>",
       '<button class="btn btn-sm btn-mint" data-act="nav" data-route="billing">Top up</button>'));
   }
 
@@ -4329,16 +4508,19 @@ async function bookableView(view) {
   ]);
   const cmap = byId(classes);
 
-  // fixed classes with a spare seat, in a subject this student already takes,
-  // matching their level — a drop-in, not a permanent enrolment. Browsing
-  // stays scoped to whichever kid's tab is active; which siblings can also
-  // be booked into any one item is worked out per item below.
+  // fixed classes with a spare seat, in a subject (and stream) this student
+  // already takes elsewhere, matching their level — a drop-in, not a
+  // permanent enrolment. Subject alone isn't enough to gate this: a G2
+  // student shouldn't be offered a spare seat in a G3 class of the same
+  // subject, so the match is subject+stream together. Browsing stays
+  // scoped to whichever kid's tab is active; which siblings can also be
+  // booked into any one item is worked out per item below.
   const myClassIds = myEnrols.map(e => e.class_id);
-  const mySubjects = new Set(myClassIds.map(id => (cmap[id] || {}).subject_id).filter(Boolean));
+  const mySubjectStreams = new Set(myClassIds.map(id => cmap[id]).filter(Boolean).map(c => c.subject_id + "_" + c.stream_id));
   const enrolledCount = {};
   allEnrols.forEach(e => (enrolledCount[e.class_id] = (enrolledCount[e.class_id] || 0) + 1));
   const openClasses = classes.filter(c =>
-    c.kind === "fixed" && c.level === s.level && mySubjects.has(c.subject_id) &&
+    c.kind === "fixed" && c.level_id === s.level_id && mySubjectStreams.has(c.subject_id + "_" + c.stream_id) &&
     !myClassIds.includes(c.id) && (enrolledCount[c.id] || 0) < c.capacity);
   const seatsLeft = {}; openClasses.forEach(c => (seatsLeft[c.id] = c.capacity - (enrolledCount[c.id] || 0)));
 
@@ -4359,14 +4541,15 @@ async function bookableView(view) {
     const open = allReports.filter(r => r.student_id === k.id && !r.redeemed_booking_id);
     makeupByKid[k.id] = open.sort((a, b) => a.reported_at.localeCompare(b.reported_at))[0] || null;
   });
-  const kidEnrolSet = {}, kidSubjectSet = {};
+  const kidEnrolSet = {}, kidSubjectStreamSet = {};
   kids.forEach(k => {
     kidEnrolSet[k.id] = new Set(allEnrols.filter(e => e.student_id === k.id).map(e => e.class_id));
-    kidSubjectSet[k.id] = new Set([...kidEnrolSet[k.id]].map(cid => (cmap[cid] || {}).subject_id).filter(Boolean));
+    kidSubjectStreamSet[k.id] = new Set([...kidEnrolSet[k.id]].map(cid => cmap[cid]).filter(Boolean)
+      .map(c => c.subject_id + "_" + c.stream_id));
   });
   const eligibleFor = (x, c, isOpenClass) => kids.filter(k =>
     Number(k.credits) > 0 &&
-    (!isOpenClass || (c.level === k.level && kidSubjectSet[k.id].has(c.subject_id) && !kidEnrolSet[k.id].has(c.id))));
+    (!isOpenClass || (c.level_id === k.level_id && kidSubjectStreamSet[k.id].has(c.subject_id + "_" + c.stream_id) && !kidEnrolSet[k.id].has(c.id))));
 
   const noCredits = Number(s.credits) <= 0;
   const makeup = makeupByKid[s.id];
@@ -4390,7 +4573,7 @@ async function bookableView(view) {
   // one RPC call for the whole week's grid, rather than one per cell — and
   // only bother at all once there's a subject to actually browse for
   let freeMap = {};
-  if (mySubjects.size) {
+  if (mySubjectStreams.size) {
     const { data, error } = await db.rpc("tutor_availability_grid", { p_from: wFrom, p_to: wTo, p_start_hour: hFrom, p_end_hour: hTo });
     if (!error && Array.isArray(data)) data.forEach(g => (freeMap[g.slot_date + "_" + g.slot_hour] = g.tutors_free));
   }
@@ -4463,7 +4646,7 @@ async function bookableView(view) {
     (noCredits ? '<div class="note bad">' + esc(s.full_name) + " has no lesson credits left. Top up before booking.</div>" : "") +
     (makeup ? '<div class="note hl">A missed lesson on ' + esc(makeupDate) +
       " was reported in advance — book any open slot below to make it up.</div>" : "") +
-    (mySubjects.size ? "" : '<div class="note">Once ' + esc(s.full_name) +
+    (mySubjectStreams.size ? "" : '<div class="note">Once ' + esc(s.full_name) +
       " is enrolled in a class, open slots and available times for that subject show up here.</div>") +
     card(fmtDate(wFrom) + " – " + fmtDate(wTo),
       '<div class="tbl-wrap"><div class="week-grid">' + cols.join("") + "</div></div>" +
@@ -4592,6 +4775,7 @@ PARENT.progress = async function (view) {
 async function accountView(view) {
   const p = state.profile;
   const phoneLine = p.phone ? p.phone + (p.phone_verified ? " · verified" : " · not verified") : "Not set";
+  const lvMap = state.students.length ? byId(await sel("levels")) : {};
   view.innerHTML =
     pageHead("My account", "") +
     card("Your details",
@@ -4620,7 +4804,7 @@ async function accountView(view) {
       '<button class="btn btn-ghost" data-act="do-reset">Send a reset link</button>') +
     (state.students.length ? card("Linked students",
       table(["Student", "Level", { t: "Credits", num: true }, { t: "Points", num: true }],
-        state.students.map(s => "<tr><td><b>" + esc(s.full_name) + "</b></td><td>" + esc(s.level || "—") + "</td>" +
+        state.students.map(s => "<tr><td><b>" + esc(s.full_name) + "</b></td><td>" + esc(nameOf(lvMap, s.level_id, "—")) + "</td>" +
           '<td class="num">' + s.credits + '</td><td class="num">' + s.points + "</td></tr>")), "", true) : "");
 }
 PARENT.account = accountView;
@@ -4739,13 +4923,14 @@ function docRow(label, value) {
 }
 
 async function showInvoiceDoc(invoiceId) {
-  let inv, student = null, parent = null, pkg = null;
+  let inv, student = null, parent = null, pkg = null, studentLevel = null;
   try {
     inv = (await sel("invoices", q => q.eq("id", invoiceId)))[0];
     if (!inv) throw new Error("Invoice not found.");
     if (inv.student_id) student = (await sel("students", q => q.eq("id", inv.student_id)))[0] || null;
     if (inv.parent_id) parent = (await sel("profiles", q => q.eq("id", inv.parent_id)))[0] || null;
     if (inv.package_id) pkg = (await sel("packages", q => q.eq("id", inv.package_id)))[0] || null;
+    if (student && student.level_id) studentLevel = (await sel("levels", q => q.eq("id", student.level_id)))[0] || null;
   } catch (e) { return fail(e); }
 
   const paid = inv.status === "paid";
@@ -4783,7 +4968,7 @@ async function showInvoiceDoc(invoiceId) {
           (parent && parent.email ? "<br>" + esc(parent.email) : "") +
           (parent && parent.phone ? "<br>" + esc(parent.phone) : "") +
           (student ? '<br><span style="color:var(--ink-soft)">For ' + esc(student.full_name) +
-            (student.level ? " · " + esc(student.level) : "") + "</span>" : "") +
+            (studentLevel ? " · " + esc(studentLevel.name) : "") + "</span>" : "") +
         "</div>" +
       "</div>" +
 
@@ -5330,12 +5515,13 @@ TUTOR.attendance = async function (view) {
 
 /* ------------------------------------------------------------- STUDENTS --- */
 TUTOR.students = async function (view) {
-  const students = await sel("students", q => q.order("full_name"));
+  const [students, levels] = await Promise.all([sel("students", q => q.order("full_name")), sel("levels")]);
+  const lvMap = byId(levels);
   view.innerHTML =
     pageHead("My students", students.length + " in your classes") +
     card("", students.length
       ? table(["Student", "Level", "School", { t: "Credits", num: true }, ""], students.map(s =>
-          "<tr><td><b>" + esc(s.full_name) + "</b></td><td>" + esc(s.level || "—") + "</td>" +
+          "<tr><td><b>" + esc(s.full_name) + "</b></td><td>" + esc(nameOf(lvMap, s.level_id, "—")) + "</td>" +
           "<td>" + esc(s.school || "—") + "</td>" +
           '<td class="num">' + s.credits + "</td>" +
           '<td class="act"><button class="btn btn-sm btn-ghost" data-act="tutor-student" data-id="' + s.id + '">Progress</button></td></tr>'))
@@ -5345,13 +5531,14 @@ TUTOR.students = async function (view) {
 async function tutorStudentDetail(id) {
   const s = (await sel("students", q => q.eq("id", id)))[0];
   if (!s) return toast("That student is not in your classes.", "bad");
-  const [mastery, topics, subjects, hw, results] = await Promise.all([
+  const [mastery, topics, subjects, hw, results, levels] = await Promise.all([
     sel("topic_mastery", q => q.eq("student_id", id)),
     sel("topics", q => q.order("sort_order")), sel("subjects"),
     sel("homework", q => q.eq("student_id", id).eq("status", "graded").order("graded_at", { ascending: false }).limit(20)),
     sel("assessments", q => q.eq("student_id", id).eq("status", "approved").order("taken_on", { ascending: false }).limit(10)),
+    sel("levels"),
   ]);
-  const tmap = byId(topics), smap = byId(subjects);
+  const tmap = byId(topics), smap = byId(subjects), lvMap = byId(levels);
   const bars = mastery.slice().sort((a, b) => (a.manual_score || a.score) - (b.manual_score || b.score)).map(m => {
     const v = Number(m.manual_score !== null && m.manual_score !== undefined ? m.manual_score : m.score);
     return '<div class="mrow"><div class="nm">' + esc(nameOf(tmap, m.topic_id, "Topic")) +
@@ -5364,7 +5551,7 @@ async function tutorStudentDetail(id) {
     title: s.full_name,
     wide: true,
     body:
-      '<div class="row" style="margin-bottom:14px"><span class="pill ink">' + esc(s.level || "—") + "</span>" +
+      '<div class="row" style="margin-bottom:14px"><span class="pill ink">' + esc(nameOf(lvMap, s.level_id, "—")) + "</span>" +
         '<span class="pill">' + esc(s.school || "school not given") + "</span></div>" +
       "<h4 style='margin-bottom:10px'>Topic by topic</h4>" +
       (bars ? '<div class="mastery">' + bars + "</div>"
@@ -5506,12 +5693,16 @@ ADMIN.mystudents = async function (view) {
   const { ids: classIds } = await myClassIds();
   const enrols = classIds.length ? await sel("enrolments", q => q.in("class_id", classIds).eq("status", "active")) : [];
   const studentIds = [...new Set(enrols.map(e => e.student_id))];
-  const students = studentIds.length ? await sel("students", q => q.in("id", studentIds).order("full_name")) : [];
+  const [students, levels] = await Promise.all([
+    studentIds.length ? sel("students", q => q.in("id", studentIds).order("full_name")) : [],
+    sel("levels"),
+  ]);
+  const lvMap = byId(levels);
   view.innerHTML =
     pageHead("My students", students.length + " in your classes") +
     card("", students.length
       ? table(["Student", "Level", "School", { t: "Credits", num: true }, ""], students.map(s =>
-          "<tr><td><b>" + esc(s.full_name) + "</b></td><td>" + esc(s.level || "—") + "</td>" +
+          "<tr><td><b>" + esc(s.full_name) + "</b></td><td>" + esc(nameOf(lvMap, s.level_id, "—")) + "</td>" +
           "<td>" + esc(s.school || "—") + "</td>" +
           '<td class="num">' + s.credits + "</td>" +
           '<td class="act"><button class="btn btn-sm btn-ghost" data-act="tutor-student" data-id="' + s.id + '">Progress</button></td></tr>'))
@@ -5747,6 +5938,16 @@ const ACTIONS = {
   "topic-del": async el => {
     if (!(await confirmBox("Delete this topic?", "Any scores recorded against it go too.", true))) return;
     try { await del("topics", el.dataset.id); toast("Topic deleted.", "ok"); render(); } catch (e) { fail(e); }
+  },
+  "level-edit": el => levelForm(el.dataset.id || null),
+  "level-del": async el => {
+    if (!(await confirmBox("Delete this level?", "Any class, student or topic set to it goes back to no level.", true))) return;
+    try { await del("levels", el.dataset.id); toast("Level deleted.", "ok"); render(); } catch (e) { fail(e); }
+  },
+  "stream-edit": el => streamForm(el.dataset.id || null),
+  "stream-del": async el => {
+    if (!(await confirmBox("Delete this stream?", "Any class set to it goes back to no stream.", true))) return;
+    try { await del("streams", el.dataset.id); toast("Stream deleted.", "ok"); render(); } catch (e) { fail(e); }
   },
 
   /* ---- invoices -------------------------------------------------------- */

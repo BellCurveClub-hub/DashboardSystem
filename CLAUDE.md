@@ -164,7 +164,11 @@ just dedicated ad-hoc sessions (see below) · families can propose a custom
 day/time nothing else covers, admin accepts and schedules it or declines
 (see below) · Progress shows a tab per subject for a student tracked in
 more than one · Book a slot is a week calendar with tutor-availability
-chips, not just a list (see below).
+chips, not just a list (see below) · a parent with more than one child can
+book one slot for one or both at once (see below) · a confirm-your-email
+screen after sign-up when the Supabase project requires it (see below) ·
+levels and streams are admin-managed reference data, not free text, and
+gate fixed-class drop-in eligibility together with subject (see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -287,6 +291,39 @@ screen) instead of calling `loadMe()`. "Back to sign in" just clears the
 flag and returns to the normal auth screen. If the Supabase project ever
 has confirmation switched off, `hasSession` is `true` and this screen never
 shows — behaviour is unchanged for that config.
+
+**Levels and streams as real reference data.** "Level" (Sec 3, P5, JC1 …)
+used to be a free-text field typed the same way on classes, students and
+topics — "Sec 3 G3" one place, "sec3 g3" another — and there was no
+"stream" (G1/G2/G3, a centre's own grouping) field at all, just folded
+into that same free text on classes only. An exact-string comparison
+silently failing was how a spare seat in a same-subject class stopped
+being offered to a family as a drop-in — the actual bug report that
+prompted this.
+
+- `levels` and `streams` are new admin-managed reference tables, each
+  just a name and a sort order — a centre defines its own lists (a
+  primary centre has no JC levels; streams are entirely a centre's own
+  naming), managed from cards at the top of the **Topics** page,
+  alongside subjects.
+- `classes.level_id`/`stream_id`, `students.level_id` and
+  `topics.level_id` replace the old free-text `level` columns, which are
+  left in place unused rather than dropped. A class now requires both a
+  level and a stream — enforced client-side in `classForm` — since a
+  class always sits at exactly one of each.
+- Drop-in eligibility for a fixed class with a spare seat
+  (`bookableView`) now matches on subject *and stream* together
+  (`subject_id + "_" + stream_id` as a set key), not subject alone — a
+  student in G2 should not be offered a spare seat in a G3 class of the
+  same subject just because both are "Additional Math." Level match is
+  `level_id === level_id`, an exact reference-id comparison instead of a
+  fragile string one.
+- The same subject+stream+level check that gates the client UI is now
+  also enforced inside `request_booking()` server-side — it previously
+  only checked capacity, credits and "not already enrolled," so a family
+  could have booked a mismatched drop-in by calling the RPC directly
+  with an arbitrary session id. Closing that gap only became practical
+  once level/stream were reliable ids instead of free text.
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a
