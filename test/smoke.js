@@ -44,9 +44,11 @@ function fixtures() {
       { id: "sm3", name: "G3", sort_order: 3 },
     ],
     topics: [
-      { id: "tp1", subject_id: "sub1", level_id: "lv3", name: "Quadratic equations", sort_order: 1 },
-      { id: "tp2", subject_id: "sub1", level_id: "lv3", name: "Trigonometry", sort_order: 2 },
-      { id: "tp3", subject_id: "sub2", level_id: "lv3", name: "Chemical bonding", sort_order: 1 },
+      { id: "tp1", subject_id: "sub1", level_id: "lv3", stream_id: "sm3", name: "Quadratic equations", sort_order: 1 },
+      { id: "tp2", subject_id: "sub1", level_id: "lv3", stream_id: "sm3", name: "Trigonometry", sort_order: 2 },
+      { id: "tp3", subject_id: "sub2", level_id: "lv3", stream_id: "sm3", name: "Chemical bonding", sort_order: 1 },
+      // same subject as tp1/tp2, but Sec 1 — should never show up when grading cl1 (Sec 3 G3)
+      { id: "tp4", subject_id: "sub1", level_id: "lv1", stream_id: null, name: "Whole numbers", sort_order: 1 },
     ],
     classes: [
       { id: "cl1", name: "Sec 3 G3 A-Math", subject_id: "sub1", level_id: "lv3", stream_id: "sm3", tutor_name: "Mr Lim", room: "R1",
@@ -342,6 +344,7 @@ async function runRole(roleName, userId, empty) {
     check("no grading columns before a topic is picked", !w.document.querySelector('[name^="grade_"]'));
     const topicToggle = w.document.querySelector('[data-act="toggle-topic-covered"][data-topic="tp1"]');
     check("topic toggle buttons render", !!topicToggle);
+    check("a topic scoped to a different level is not offered", !w.document.querySelector('[data-act="toggle-topic-covered"][data-topic="tp4"]'));
     if (topicToggle) topicToggle.click();
     await new Promise(r => setTimeout(r, 60));
     const gradeInput = w.document.querySelector('[name="grade_st1_tp1"]');
@@ -464,6 +467,18 @@ async function runRole(roleName, userId, empty) {
     check("grading scales render", /A1/.test(w.document.querySelector("#view").textContent));
     await tryClick('[data-act="band-edit"]');
     await tryClick('[data-act="etype-edit"]');
+    w.location.hash = "#/topics"; await w.eval("render()"); await new Promise(r => setTimeout(r, 90));
+    const subjEditBtn = w.document.querySelector('[data-act="subject-edit"]');
+    check("subject edit button renders", !!subjEditBtn);
+    if (subjEditBtn) {
+      subjEditBtn.click();
+      await new Promise(r => setTimeout(r, 100));
+      const m = w.document.querySelector(".modal");
+      check("subject edit opens prefilled", !!m && /Edit Mathematics/.test((m.querySelector("h3") || {}).textContent || ""));
+      const nameField = w.document.querySelector("#f_name");
+      check("subject edit form prefills the name", !!nameField && nameField.value === "Mathematics");
+      w.document.querySelector('[data-act="modal-close"]').click();
+    }
     w.location.hash = "#/schedule"; await w.eval("render()"); await new Promise(r => setTimeout(r, 90));
     check("admin still sees every class",
       /Someone else/.test(w.document.querySelector("#view").textContent));

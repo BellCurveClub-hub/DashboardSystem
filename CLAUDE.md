@@ -324,6 +324,25 @@ prompted this.
   could have booked a mismatched drop-in by calling the RPC directly
   with an arbitrary session id. Closing that gap only became practical
   once level/stream were reliable ids instead of free text.
+- `topics.level_id`/`stream_id` (nullable — null means "applies at every
+  level"/"every stream") gate which topics a tutor can pick when grading
+  a lesson: a subject alone doesn't say which topics are in scope, since
+  the same subject differs by level and by stream at this centre.
+  `attendanceSheet` fetches every topic under the class's subject, then
+  filters to ones whose level/stream is unset or matches the class's —
+  the actual wiring was missing before (the field existed but nothing
+  read it), which is what surfaced this gap in the first place.
+- Levels and streams reorder by dragging a row, not typing a number —
+  `sort_order` is written straight from the row's position on drop.
+  This needed a second delegated listener pattern (`dragstart`/
+  `dragover`/`drop`/`dragend` on `document`, keyed off
+  `[data-drag-list]`/`[data-drag-id]`) alongside the existing click
+  delegation, since native drag events are a different event family.
+  Topics kept the plain typed-in Order field instead — there are usually
+  many more of them per subject than there are levels or streams, where
+  typing a number beats dragging one row at a time.
+- Subjects gained an edit button (`subjectForm` now takes an optional
+  id) — it only ever supported adding before.
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a

@@ -282,6 +282,9 @@ table.tbl tbody tr:hover{background:#FDFBF6}
 table.tbl tbody tr:last-child td{border-bottom:0}
 table.tbl td.num,table.tbl th.num{text-align:right; font-variant-numeric:tabular-nums}
 table.tbl td.act{text-align:right; white-space:nowrap}
+table.tbl td.drag-handle{width:1%; padding-right:4px; cursor:grab; color:var(--ink-faint); font-size:15px}
+table.tbl tr[draggable="true"].dragging{opacity:.4}
+table.tbl tr[draggable="true"]:active .drag-handle{cursor:grabbing}
 .empty{padding:36px 20px; text-align:center; color:var(--ink-soft)}
 .empty .big{font-size:30px; margin-bottom:8px; opacity:.55}
 .empty h4{margin-bottom:5px}
@@ -2064,6 +2067,19 @@ begin
 
   return v_status::text;
 end $$;
+
+-- ===========================================================================
+-- PART 9 — Topics scoped by level and stream too, not just subject
+-- Added after the first release. Safe to run on an existing database.
+--
+-- A subject alone doesn't determine which topics apply — "Additional Math
+-- Sec 3" and "Additional Math Sec 4" cover different chapters, and this
+-- centre's streams carry different content too, not just a different
+-- pace. topics.level_id already existed; stream_id was missing. Both are
+-- optional per topic (null means "applies at every level" / "every
+-- stream"), so a topic can be as broad or as specific as it needs to be.
+-- ===========================================================================
+alter table topics add column if not exists stream_id uuid references streams(id) on delete set null;
 `;
 
 /* ============================================================================
@@ -3245,7 +3261,7 @@ ADMIN.attendance = async function (view) {
 async function attendanceSheet(sessionId) {
   const s = (await sel("sessions", q => q.eq("id", sessionId)))[0];
   const c = (await sel("classes", q => q.eq("id", s.class_id)))[0] || {};
-  const [enrols, bookings, students, att, reports, topics, grades] = await Promise.all([
+  const [enrols, bookings, students, att, reports, subjectTopics, grades] = await Promise.all([
     sel("enrolments", q => q.eq("class_id", s.class_id).eq("status", "active")),
     sel("bookings", q => q.eq("session_id", sessionId).eq("status", "confirmed")),
     sel("students", q => q.eq("is_active", true)),
@@ -3254,6 +3270,11 @@ async function attendanceSheet(sessionId) {
     c.subject_id ? sel("topics", q => q.eq("subject_id", c.subject_id).order("sort_order")) : [],
     sel("lesson_topic_grades", q => q.eq("session_id", sessionId)),
   ]);
+  // a topic with no level/stream set applies everywhere; one that does
+  // must match this class's — a subject alone doesn't say which topics
+  // are in scope, since the same subject differs by level and stream
+  const topics = subjectTopics.filter(t =>
+    (!t.level_id || t.level_id === c.level_id) && (!t.stream_id || t.stream_id === c.stream_id));
   const smap = byId(students);
   const amap = {}; att.forEach(a => (amap[a.student_id] = a));
   const rmap = {}; reports.forEach(r => (rmap[r.student_id] = r));
@@ -4119,32 +4140,40 @@ ADMIN.topics = async function (view) {
     sel("topics", q => q.order("sort_order")), sel("subjects", q => q.order("name")),
     sel("levels", q => q.order("sort_order")), sel("streams", q => q.order("sort_order")),
   ]);
-  const lvMap = byId(levels);
+  const lvMap = byId(levels), stMap = byId(streams);
   const blocks = subjects.map(s => {
     const list = topics.filter(t => t.subject_id === s.id);
     return card(s.name, list.length
-      ? table(["#", "Topic", "Level", ""], list.map(t =>
-          '<tr><td class="num">' + t.sort_order + "</td><td><b>" + esc(t.name) + "</b></td><td>" + esc(nameOf(lvMap, t.level_id, "Any level")) + "</td>" +
+      ? table(["#", "Topic", "Level", "Stream", ""], list.map(t =>
+          '<tr><td class="num">' + t.sort_order + "</td><td><b>" + esc(t.name) + "</b></td>" +
+          "<td>" + esc(nameOf(lvMap, t.level_id, "Any level")) + "</td>" +
+          "<td>" + esc(nameOf(stMap, t.stream_id, "Any stream")) + "</td>" +
           '<td class="act"><button class="btn btn-sm btn-ghost" data-act="topic-edit" data-id="' + t.id + '">Edit</button> ' +
           '<button class="btn btn-sm btn-danger" data-act="topic-del" data-id="' + t.id + '">Delete</button></td></tr>'))
       : emptyState("◈", "No topics under " + s.name, "Add the chapters you want to score students on."),
+      '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ' +
       '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '">Add a topic</button>', true);
   }).join("");
 
-  const refRows = (list, editAct, delAct) => list.map(x =>
-    "<tr><td><b>" + esc(x.name) + "</b></td><td class='num'>" + x.sort_order + "</td>" +
+  // levels and streams reorder by dragging the row (persisted straight to
+  // sort_order on drop); topics keep a plain typed-in Order number instead
+  // — there are usually many more of them per subject, where a manual
+  // number is quicker than dragging one at a time.
+  const dragRows = (list, tbl, editAct, delAct) => list.map(x =>
+    '<tr draggable="true" data-drag-list="' + tbl + '" data-drag-id="' + x.id + '">' +
+    '<td class="drag-handle" title="Drag to reorder">⠿</td><td><b>' + esc(x.name) + "</b></td>" +
     '<td class="act"><button class="btn btn-sm btn-ghost" data-act="' + editAct + '" data-id="' + x.id + '">Edit</button> ' +
     '<button class="btn btn-sm btn-danger" data-act="' + delAct + '" data-id="' + x.id + '">Delete</button></td></tr>');
 
   view.innerHTML =
     pageHead("Topics", "The chapters a student's proficiency is scored against",
       '<button class="btn btn-ghost" data-act="subject-add">Add a subject</button>') +
-    '<div class="note">Levels and streams are set up once here, then picked from a dropdown everywhere a class or a student needs one — a class needs a subject, a level and a stream; a student has one level and, through whichever classes they\'re enrolled in, a stream per subject.</div>' +
+    '<div class="note">Levels and streams are set up once here, then picked from a dropdown everywhere a class or a student needs one — a class needs a subject, a level and a stream; a student has one level and, through whichever classes they\'re enrolled in, a stream per subject. Drag a row to reorder it.</div>' +
     '<div class="cols cols-2">' +
-      card("Levels", levels.length ? table(["Level", { t: "Order", num: true }, ""], refRows(levels, "level-edit", "level-del"))
+      card("Levels", levels.length ? table(["", "Level", ""], dragRows(levels, "levels", "level-edit", "level-del"))
         : emptyState("◱", "No levels yet", "e.g. P1–P6, Sec 1–5, JC1–2 — whatever this centre teaches."),
         '<button class="btn btn-sm btn-mint" data-act="level-edit">Add a level</button>', true) +
-      card("Streams", streams.length ? table(["Stream", { t: "Order", num: true }, ""], refRows(streams, "stream-edit", "stream-del"))
+      card("Streams", streams.length ? table(["", "Stream", ""], dragRows(streams, "streams", "stream-edit", "stream-del"))
         : emptyState("◱", "No streams yet", "e.g. G1, G2, G3 — this centre's own grouping."),
         '<button class="btn btn-sm btn-mint" data-act="stream-edit">Add a stream</button>', true) +
     "</div>" +
@@ -4153,14 +4182,17 @@ ADMIN.topics = async function (view) {
 
 async function topicForm(id, subjectId) {
   const t = id ? (await sel("topics", q => q.eq("id", id)))[0] : null;
-  const [subjects, levels] = await Promise.all([sel("subjects", q => q.order("name")), sel("levels", q => q.order("sort_order"))]);
+  const [subjects, levels, streams] = await Promise.all([
+    sel("subjects", q => q.order("name")), sel("levels", q => q.order("sort_order")), sel("streams", q => q.order("sort_order")),
+  ]);
   openModal({
     title: t ? "Edit topic" : "Add a topic",
     body:
       fSelect("subject_id", "Subject", t ? t.subject_id : subjectId || "", subjects.map(s => ({ value: s.id, label: s.name }))) +
       fText("name", "Topic", t ? t.name : "", { required: true, placeholder: "Quadratic equations" }) +
-      '<div class="grid-2">' +
+      '<div class="grid-3">' +
         fSelect("level_id", "Level", t ? t.level_id : "", levels.map(l => ({ value: l.id, label: l.name })), { blank: "Any level" }) +
+        fSelect("stream_id", "Stream", t ? t.stream_id : "", streams.map(s => ({ value: s.id, label: s.name })), { blank: "Any stream" }) +
         fText("sort_order", "Order", t ? t.sort_order : 0, { type: "number" }) +
       "</div>",
     onSave: async () => {
@@ -4174,30 +4206,37 @@ async function topicForm(id, subjectId) {
   });
 }
 
-function subjectForm() {
+async function subjectForm(id) {
+  const s = id ? (await sel("subjects", q => q.eq("id", id)))[0] : null;
   openModal({
-    title: "Add a subject",
-    body: fText("name", "Subject", "", { required: true, placeholder: "Additional Mathematics" }) +
-          fText("colour", "Colour", "#2EC4B6"),
+    title: s ? "Edit " + s.name : "Add a subject",
+    body: fText("name", "Subject", s ? s.name : "", { required: true, placeholder: "Additional Mathematics" }) +
+          fText("colour", "Colour", s ? s.colour : "#2EC4B6"),
     onSave: async () => {
       const v = modalValues();
       if (!v.name) return toast("Name the subject.", "bad");
-      try { await ins("subjects", v); closeModal(); toast("Subject added.", "ok"); render(); } catch (e) { fail(e); }
+      try {
+        if (s) await upd("subjects", s.id, v); else await ins("subjects", v);
+        closeModal(); toast("Subject saved.", "ok"); render();
+      } catch (e) { fail(e); }
     },
   });
 }
 
+// order for levels and streams is set by dragging a row, not typed in —
+// a new one just goes on the end
 async function levelForm(id) {
   const l = id ? (await sel("levels", q => q.eq("id", id)))[0] : null;
+  const existing = await sel("levels");
   openModal({
     title: l ? "Edit level" : "Add a level",
-    body: fText("name", "Name", l ? l.name : "", { required: true, placeholder: "Sec 3" }) +
-          fText("sort_order", "Order", l ? l.sort_order : 0, { type: "number" }),
+    body: fText("name", "Name", l ? l.name : "", { required: true, placeholder: "Sec 3" }),
     onSave: async () => {
       const v = modalValues();
       if (!v.name) return toast("Name the level.", "bad");
       try {
-        if (l) await upd("levels", l.id, v); else await ins("levels", v);
+        if (l) await upd("levels", l.id, v);
+        else await ins("levels", Object.assign(v, { sort_order: existing.length ? Math.max(...existing.map(x => x.sort_order)) + 1 : 0 }));
         closeModal(); toast("Level saved.", "ok"); render();
       } catch (e) { fail(e); }
     },
@@ -4206,15 +4245,16 @@ async function levelForm(id) {
 
 async function streamForm(id) {
   const s = id ? (await sel("streams", q => q.eq("id", id)))[0] : null;
+  const existing = await sel("streams");
   openModal({
     title: s ? "Edit stream" : "Add a stream",
-    body: fText("name", "Name", s ? s.name : "", { required: true, placeholder: "G3" }) +
-          fText("sort_order", "Order", s ? s.sort_order : 0, { type: "number" }),
+    body: fText("name", "Name", s ? s.name : "", { required: true, placeholder: "G3" }),
     onSave: async () => {
       const v = modalValues();
       if (!v.name) return toast("Name the stream.", "bad");
       try {
-        if (s) await upd("streams", s.id, v); else await ins("streams", v);
+        if (s) await upd("streams", s.id, v);
+        else await ins("streams", Object.assign(v, { sort_order: existing.length ? Math.max(...existing.map(x => x.sort_order)) + 1 : 0 }));
         closeModal(); toast("Stream saved.", "ok"); render();
       } catch (e) { fail(e); }
     },
@@ -5933,6 +5973,7 @@ const ACTIONS = {
   /* ---- classes, subjects, packages, topics ----------------------------- */
   "class-edit": el => classForm(el.dataset.id || null),
   "subject-add": () => subjectForm(),
+  "subject-edit": el => subjectForm(el.dataset.id),
   "package-edit": el => packageForm(el.dataset.id || null),
   "topic-edit": el => topicForm(el.dataset.id || null, el.dataset.subject || null),
   "topic-del": async el => {
@@ -6153,6 +6194,43 @@ document.addEventListener("click", ev => {
     return;
   }
   if (ev.target.classList && ev.target.classList.contains("modal-scrim")) ACTIONS["modal-close"]();
+});
+
+/* drag-to-reorder: any table of rows carrying [data-drag-list]/[data-drag-id]
+   (currently levels and streams). Reorder is computed from the rows' DOM
+   order at drop time, then persisted by writing a fresh sort_order to every
+   row in that list — simpler than tracking a running index across drags. */
+let dragRow = null;
+document.addEventListener("dragstart", ev => {
+  const row = ev.target.closest("[data-drag-list]");
+  if (!row) return;
+  dragRow = row;
+  ev.dataTransfer.effectAllowed = "move";
+  ev.dataTransfer.setData("text/plain", row.dataset.dragId);
+  row.classList.add("dragging");
+});
+document.addEventListener("dragover", ev => {
+  const row = ev.target.closest("[data-drag-list]");
+  if (!row || !dragRow || row.dataset.dragList !== dragRow.dataset.dragList) return;
+  ev.preventDefault();
+});
+document.addEventListener("dragend", () => {
+  if (dragRow) dragRow.classList.remove("dragging");
+  dragRow = null;
+});
+document.addEventListener("drop", async ev => {
+  const row = ev.target.closest("[data-drag-list]");
+  if (!row || !dragRow || row.dataset.dragList !== dragRow.dataset.dragList || row === dragRow) return;
+  ev.preventDefault();
+  const list = dragRow.dataset.dragList;
+  const rect = row.getBoundingClientRect();
+  const after = ev.clientY > rect.top + rect.height / 2;
+  row.insertAdjacentElement(after ? "afterend" : "beforebegin", dragRow);
+  const ids = $$('[data-drag-list="' + list + '"]', row.closest("table")).map(r => r.dataset.dragId);
+  try {
+    await Promise.all(ids.map((id, i) => upd(list, id, { sort_order: i })));
+    render();
+  } catch (e) { fail(e); }
 });
 
 document.addEventListener("keydown", ev => {
