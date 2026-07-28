@@ -168,11 +168,21 @@ more than one.
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
 
-- A grid of topics (from the class's subject) × attending students, each
-  cell a 0–100 score. `lesson_topic_grades` is a new table, not an override:
-  each save is one more sample `recompute_mastery()` averages over the last
-  8, same as graded homework and approved centre tests already do — a trend
-  builds up lesson by lesson instead of one score replacing the last.
+- The tutor first picks which topics (from the class's subject) the
+  lesson covered — toggle buttons, not a checkbox, since the global click
+  handler unconditionally calls `preventDefault()` and would revert a real
+  checkbox's native toggle right after; the same `aria-selected` pattern
+  the invoice-status filter already uses, just multi-select. Only picked
+  topics get a grading column; the grid regenerates in place
+  (`renderTopicGrid`, stashed on `#modal-host.__renderTopicGrid` so the
+  toggle handler can reach it) without touching attendance, summary or
+  homework fields already filled in elsewhere in the same modal.
+- Each grid cell is a 0–100 score. `lesson_topic_grades` is a new table,
+  not an override: each save is one more sample `recompute_mastery()`
+  averages over the last 8, same as graded homework and approved centre
+  tests already do — a trend builds up lesson by lesson instead of one
+  score replacing the last. Un-picking a topic that already had grades
+  deletes them for that session.
 - A free-text "what was covered" summary lives on `sessions.lesson_summary`.
 - Homework can be assigned inline to everyone in the register in the same
   save, reusing the bulk-assign-to-class insert `homeworkForm` already does.

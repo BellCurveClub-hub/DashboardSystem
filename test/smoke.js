@@ -278,8 +278,13 @@ async function runRole(roleName, userId, empty) {
     // --- lesson report: topic grading, summary, inline homework ---
     w.document.querySelector('[data-act="take-attendance"]').click();
     await new Promise(r => setTimeout(r, 120));
+    check("no grading columns before a topic is picked", !w.document.querySelector('[name^="grade_"]'));
+    const topicToggle = w.document.querySelector('[data-act="toggle-topic-covered"][data-topic="tp1"]');
+    check("topic toggle buttons render", !!topicToggle);
+    if (topicToggle) topicToggle.click();
+    await new Promise(r => setTimeout(r, 60));
     const gradeInput = w.document.querySelector('[name="grade_st1_tp1"]');
-    check("topic proficiency grid renders", !!gradeInput);
+    check("picking a topic reveals its grading column", !!gradeInput);
     if (gradeInput) gradeInput.value = "82";
     const summaryEl = w.document.querySelector("#f_lesson_summary");
     if (summaryEl) summaryEl.value = "Covered quadratic factoring.";

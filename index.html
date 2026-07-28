@@ -3063,15 +3063,21 @@ async function attendanceSheet(sessionId) {
       "</select></td></tr>";
   });
 
-  const topicGrid = topics.length ? table(
-    ["Student"].concat(topics.map(t => t.name)),
-    ids.map(sid => "<tr><td><b>" + esc((smap[sid] || {}).full_name || "") + "</b></td>" +
-      topics.map(t => {
-        const g = gmap[sid + "_" + t.id];
-        return '<td><input type="number" min="0" max="100" step="0.5" style="width:64px" name="grade_' +
-          sid + "_" + t.id + '" value="' + (g ? g.score : "") + '"></td>';
-      }).join("") + "</tr>")
-  ) : "";
+  // only topics ticked below get a grading column — pre-tick whichever
+  // topics this session already has grades saved for
+  const initiallyCovered = new Set(topics.filter(t => ids.some(sid => gmap[sid + "_" + t.id])).map(t => t.id));
+
+  const renderTopicGrid = coveredIds => {
+    const covered = topics.filter(t => coveredIds.has(t.id));
+    if (!covered.length) return "<p class='hint'>Tick a topic above to grade proficiency on it.</p>";
+    return table(["Student"].concat(covered.map(t => t.name)),
+      ids.map(sid => "<tr><td><b>" + esc((smap[sid] || {}).full_name || "") + "</b></td>" +
+        covered.map(t => {
+          const g = gmap[sid + "_" + t.id];
+          return '<td><input type="number" min="0" max="100" step="0.5" style="width:64px" name="grade_' +
+            sid + "_" + t.id + '" value="' + (g ? g.score : "") + '"></td>';
+        }).join("") + "</tr>"));
+  };
 
   openModal({
     title: (c.name || "Class") + " · " + fmtDate(s.session_date) + " " + fmtTime(s.start_time),
@@ -3081,9 +3087,13 @@ async function attendanceSheet(sessionId) {
       '<div class="btn-row" style="margin-bottom:12px"><button class="btn btn-sm btn-ghost" data-act="att-all" data-v="present">Mark everyone present</button></div>' +
       table(["Student", "Attendance"], rows) +
       (topics.length
-        ? "<div class='divider'></div><h4 style='margin-bottom:6px'>Topic proficiency</h4>" +
-          "<p class='hint' style='margin-bottom:10px'>Score out of 100 for topics this lesson covered — leave a box blank to skip it.</p>" +
-          topicGrid
+        ? "<div class='divider'></div><h4 style='margin-bottom:6px'>Topics covered this lesson</h4>" +
+          "<p class='hint' style='margin-bottom:10px'>Pick one or more to grade each student's proficiency on them.</p>" +
+          '<div class="btn-row" style="flex-wrap:wrap;margin-bottom:12px">' +
+          topics.map(t => '<button type="button" class="kid-tab" aria-selected="' + initiallyCovered.has(t.id) +
+            '" data-act="toggle-topic-covered" data-topic="' + t.id + '">' + esc(t.name) + "</button>").join("") +
+          "</div>" +
+          '<div id="topic-grid-holder">' + renderTopicGrid(initiallyCovered) + "</div>"
         : "") +
       "<div class='divider'></div><h4 style='margin-bottom:10px'>Lesson summary</h4>" +
       fArea("lesson_summary", "What was covered", s.lesson_summary || "") +
@@ -3104,12 +3114,14 @@ async function attendanceSheet(sessionId) {
           else await ins("attendance", { session_id: sessionId, student_id: sid, status: v, marked_by: state.user.id });
         }
 
+        const coveredNow = new Set($$('[data-act="toggle-topic-covered"][aria-selected="true"]').map(el => el.dataset.topic));
         for (const sid of ids) {
           for (const t of topics) {
+            const existing = gmap[sid + "_" + t.id];
+            if (!coveredNow.has(t.id)) { if (existing) await del("lesson_topic_grades", existing.id); continue; }
             const el = $('[name="grade_' + sid + '_' + t.id + '"]');
             if (!el) continue;
             const val = el.value.trim();
-            const existing = gmap[sid + "_" + t.id];
             if (val === "") { if (existing) await del("lesson_topic_grades", existing.id); continue; }
             const num = Number(val);
             if (existing) { if (Number(existing.score) !== num) await upd("lesson_topic_grades", existing.id, { score: num, graded_by: state.user.id, updated_at: new Date().toISOString() }); }
@@ -3138,6 +3150,9 @@ async function attendanceSheet(sessionId) {
       } catch (e) { fail(e); }
     },
   });
+  // lets the toggle-topic-covered click handler regenerate just the grid,
+  // without wiping whatever's already typed elsewhere in the modal
+  $("#modal-host").__renderTopicGrid = renderTopicGrid;
 }
 
 /* ============================================================================
@@ -5305,6 +5320,14 @@ const ACTIONS = {
   /* ---- attendance ------------------------------------------------------ */
   "take-attendance": el => attendanceSheet(el.dataset.id),
   "att-all": el => $$('.modal-body select[name^="att_"]').forEach(s => (s.value = el.dataset.v)),
+  "toggle-topic-covered": el => {
+    const host = $("#modal-host");
+    const holder = $("#topic-grid-holder");
+    if (!host.__renderTopicGrid || !holder) return;
+    el.setAttribute("aria-selected", el.getAttribute("aria-selected") !== "true");
+    const covered = new Set($$('[data-act="toggle-topic-covered"][aria-selected="true"]').map(x => x.dataset.topic));
+    holder.innerHTML = host.__renderTopicGrid(covered);
+  },
   "att-date": () => { state.attDate = $("#f_attdate").value || today(); render(); },
   "att-shift": el => { state.attDate = addDays(state.attDate, Number(el.dataset.d)); render(); },
 
