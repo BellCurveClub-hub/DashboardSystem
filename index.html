@@ -2966,7 +2966,7 @@ ADMIN.classes = async function (view) {
 async function classForm(id) {
   const c = id ? (await sel("classes", q => q.eq("id", id)))[0] : null;
   const subjects = await sel("subjects", q => q.order("name"));
-  const tutors = await sel("profiles", q => q.eq("role", "tutor").order("full_name"));
+  const tutors = await sel("profiles", q => q.in("role", ["tutor", "admin"]).order("full_name"));
   openModal({
     title: c ? "Edit " + c.name : "Add a class",
     body:
