@@ -87,6 +87,15 @@ function fixtures() {
       { id: "bk2", session_id: "se2", student_id: "st1", status: "confirmed", booked_by: UID.parent, note: "", created_at: new Date().toISOString() },
     ],
     attendance: [{ id: "at1", session_id: "se3", student_id: "st1", status: "present", credits_charged: 1, marked_by: UID.admin, marked_at: new Date().toISOString() }],
+    // st2 gave advance notice they'll miss se5 — unredeemed, so Schedule
+    // should offer "Withdraw" rather than a cancel-booking button. Kept on
+    // st2, not st1: makeupByKid is per-student, not per-session, so an
+    // open report on st1 would relabel every one of st1's bookable-slot
+    // checkboxes elsewhere in these fixtures as a makeup redemption.
+    absence_reports: [
+      { id: "ar1", session_id: "se5", student_id: "st2", reported_by: UID.parent, reported_at: new Date().toISOString(),
+        redeemed_booking_id: null, created_at: new Date().toISOString() },
+    ],
     lesson_topic_grades: [],
     lesson_requests: [
       { id: "lr1", student_id: "st2", subject_id: "sub1", requested_date: plus(4), requested_time: "17:00",
@@ -528,6 +537,16 @@ async function runRole(roleName, userId, empty) {
     const bookingCalls = DB.__rpcCalls.filter(c => c.fn === "request_booking");
     check("unchecking a child excludes them from the batch booking",
       bookingCalls.length === 1 && bookingCalls[0].args.p_student === "st1");
+
+    // --- makeup: an unredeemed absence report offers Withdraw, not Cancel ---
+    w.location.hash = "#/schedule"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    const st2Tab = w.document.querySelector('[data-act="pick-student"][data-id="st2"]');
+    if (st2Tab) { st2Tab.click(); await new Promise(r => setTimeout(r, 80)); }
+    const withdrawBtn = w.document.querySelector('[data-act="withdraw-absence"]');
+    check("withdraw button renders for an unredeemed absence report", !!withdrawBtn);
+    check("withdraw button targets the right report", !withdrawBtn || withdrawBtn.dataset.id === "ar1");
+    const st1Tab = w.document.querySelector('[data-act="pick-student"][data-id="st1"]');
+    if (st1Tab) { st1Tab.click(); await new Promise(r => setTimeout(r, 80)); }
 
     // --- progress: subject tabs for a student with more than one subject ---
     w.location.hash = "#/progress"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));

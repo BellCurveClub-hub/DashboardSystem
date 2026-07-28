@@ -2111,6 +2111,62 @@ end $$;
 -- stream"), so a topic can be as broad or as specific as it needs to be.
 -- ===========================================================================
 alter table topics add column if not exists stream_id uuid references streams(id) on delete set null;
+
+-- ===========================================================================
+-- PART 10 — Cancel either side of a makeup, both under the same 24h notice
+-- Added after the first release. Safe to run on an existing database.
+--
+-- A makeup has two things a family might need to undo: the report itself
+-- (before it's redeemed — "actually we can make it after all"), and the
+-- makeup slot they booked into (after redeeming — same as cancelling any
+-- other booking). Cancelling the booking already worked, but left the
+-- absence report permanently stuck "redeemed" against a now-cancelled
+-- booking, since cancel_booking() never knew the two were linked — the
+-- family could not then redeem the same report against a different slot.
+-- ===========================================================================
+create or replace function cancel_booking(p_booking uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_b bookings; v_s sessions; v_hours int;
+begin
+  select * into v_b from bookings where id = p_booking;
+  if v_b is null then raise exception 'Booking not found.'; end if;
+  if not (is_admin() or v_b.student_id in (select my_student_ids())) then
+    raise exception 'That is not your booking.';
+  end if;
+  select * into v_s from sessions where id = v_b.session_id;
+  v_hours := setting_int('cancel_hours', 24);
+  if not is_admin() and (v_s.session_date + v_s.start_time) < now() + (v_hours || ' hours')::interval then
+    raise exception 'Too late to cancel online — please call the centre.';
+  end if;
+  update bookings set status = 'cancelled' where id = p_booking;
+  -- free up the makeup report this booking was redeeming, if any, so it
+  -- can be redeemed again against a different slot
+  update absence_reports set redeemed_booking_id = null where redeemed_booking_id = p_booking;
+end $$;
+
+-- withdraw an absence report before it's been redeemed — same notice
+-- window as reporting it in the first place. Once redeemed, cancel the
+-- makeup booking instead (which now reopens the report via the trigger
+-- above), rather than withdrawing under someone's feet mid-booking.
+create or replace function withdraw_absence_report(p_report uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_rep absence_reports; v_sess sessions; v_hours int;
+begin
+  select * into v_rep from absence_reports where id = p_report;
+  if v_rep is null then raise exception 'Absence report not found.'; end if;
+  if not (is_admin() or v_rep.student_id in (select my_student_ids())) then
+    raise exception 'That is not your absence report.';
+  end if;
+  if v_rep.redeemed_booking_id is not null then
+    raise exception 'A makeup slot has already been booked against this — cancel that booking first.';
+  end if;
+  select * into v_sess from sessions where id = v_rep.session_id;
+  v_hours := setting_int('cancel_hours', 24);
+  if not is_admin() and (v_sess.session_date + v_sess.start_time) < now() + (v_hours || ' hours')::interval then
+    raise exception 'Too late to withdraw online — please call the centre.';
+  end if;
+  delete from absence_reports where id = p_report;
+end $$;
 `;
 
 /* ============================================================================
@@ -4495,6 +4551,8 @@ function sessionCards(list, classes, showActions, studentId) {
     } else if (showActions && !b && !r && s.status === "scheduled" && future) {
       action = '<button class="btn btn-sm btn-ghost" data-act="report-absence" data-session="' + s.id +
         '" data-student="' + studentId + '" data-date="' + s.session_date + '">Report absence</button>';
+    } else if (showActions && !b && r && !r.redeemed_booking_id && future) {
+      action = '<button class="btn btn-sm btn-ghost" data-act="withdraw-absence" data-id="' + r.id + '">Withdraw</button>';
     }
     return "<tr><td><b>" + esc(fmtDate(s.session_date)) + "</b><br>" + esc(fmtRange(s.start_time, s.end_time)) + "</td>" +
       "<td>" + esc(c.name || "Class") + "<br><span style='color:var(--ink-faint);font-size:12px'>" +
@@ -4627,19 +4685,12 @@ async function bookableView(view) {
   const makeupSession = makeup ? (await sel("sessions", q => q.eq("id", makeup.session_id)))[0] : null;
   const makeupDate = makeupSession ? fmtDate(makeupSession.session_date) : "";
 
-  // the hour band worth drawing — derived from actual class and session
-  // times rather than a guessed-at fixed range. Ad-hoc classes have no
-  // start_time/end_time of their own (each session sets its own), so
-  // fixed classes alone would silently miss them — this looks at both.
-  let hFrom = 24, hTo = 0;
-  const spanHours = (start, end) => {
-    if (!start || !end) return;
-    hFrom = Math.min(hFrom, Number(start.slice(0, 2)));
-    hTo = Math.max(hTo, Number(end.slice(0, 2)) + (end.slice(3, 5) > "00" ? 1 : 0));
-  };
-  classes.forEach(c => spanHours(c.start_time, c.end_time));
-  sessions.forEach(x => spanHours(x.start_time, x.end_time));
-  if (hFrom > hTo) { hFrom = 14; hTo = 21; }
+  // the hour band worth drawing — a fixed centre-hours window, not derived
+  // from whatever happens to be scheduled: 9am-10pm on a weekend, noon-10pm
+  // on a weekday (the grid spans the union, 9am-10pm; cellFor blanks out
+  // the free/busy chip on weekday mornings — an already-scheduled session
+  // there still shows regardless, since that's real, not a proposal).
+  const hFrom = 9, hTo = 22;
 
   // one RPC call for the whole week's grid, rather than one per cell — and
   // only bother at all once there's a subject to actually browse for
@@ -4691,6 +4742,8 @@ async function bookableView(view) {
         (isOpenClass ? '<div class="m">' + seatsLeft[x.class_id] + " seat" + (seatsLeft[x.class_id] === 1 ? "" : "s") + " left</div>" : "") +
         '<div style="margin-top:5px">' + body + "</div></div>";
     }
+    const dow = new Date(d + "T00:00:00").getDay();
+    if ((dow >= 1 && dow <= 5) && h < 12) return ""; // weekday window starts at noon
     const free = freeMap[key];
     if (free === undefined) return "";
     return free > 0
@@ -5969,6 +6022,14 @@ const ACTIONS = {
       if (error) throw error;
       toast(data === "confirmed" ? "Makeup booked." : data === "waitlisted" ? "Added to the waitlist." : "Request sent.", "ok");
       render();
+    } catch (e) { fail(e); }
+  },
+  "withdraw-absence": async el => {
+    if (!(await confirmBox("Withdraw this absence report?", "The lesson goes back to normal — you'll be expected to attend."))) return;
+    try {
+      const { error } = await db.rpc("withdraw_absence_report", { p_report: el.dataset.id });
+      if (error) throw error;
+      toast("Absence report withdrawn.", "ok"); render();
     } catch (e) { fail(e); }
   },
   "lesson-request": () => lessonRequestForm(),

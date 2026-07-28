@@ -239,10 +239,14 @@ whatever that tutor is already assigned to (`sessions` joined to
 `classes.tutor_id`) — one call for the whole visible week, not one round
 trip per cell.
 
-- Book a slot's hour band is derived from actual class *and session*
-  times, not guessed — ad-hoc classes have no `start_time`/`end_time` of
-  their own (each session sets its own), so deriving from `classes` alone
-  silently misses them.
+- Book a slot's hour band is a fixed centre-hours window — 9am–10pm on a
+  weekend, noon–10pm on a weekday — not derived from whatever happens to
+  be scheduled (an earlier version derived it from actual class/session
+  times, which meant the window silently shrank or grew with the data).
+  The grid always spans the wider 9am–10pm range; `cellFor` blanks the
+  free/busy chip on weekday mornings, but an already-scheduled session
+  there still renders regardless — the fixed window only limits what's
+  *offered*, never hides something already booked.
 - A cell with an existing bookable session (ad-hoc, or a fixed class with
   a spare seat) shows that session, clickable, same as before. A cell with
   no session but `tutors_free > 0` is a green chip — clicking it opens
@@ -397,6 +401,18 @@ makeup isn't a new balance or ledger, just a record that notice was given.
   attendance register.
 - Not built: any cap on how many makeups a student can bank, or an expiry —
   by design, they don't expire, same as credits.
+- Both sides of a makeup can be undone, under the same `cancel_hours`
+  notice either way. `withdraw_absence_report(report)` retracts a report
+  before it's redeemed (deletes the row — "actually we can make it after
+  all"); `cancel_booking()` on an already-redeemed makeup slot works the
+  same as cancelling any other booking, and now also clears
+  `absence_reports.redeemed_booking_id` back to null so the report can be
+  redeemed again against a different slot. Before this fix, cancelling a
+  makeup booking left the report permanently stuck "redeemed" against a
+  cancelled booking, with no way to book a replacement makeup — the bug
+  that prompted this. Once redeemed, `withdraw_absence_report` refuses
+  (cancel the booking first) rather than pulling the report out from
+  under an active booking.
 
 **Tutor sign-up.** The sign-up screen offers "A tutor" alongside parent and
 student, but a tutor sign-up never lands as `tutor` directly.
