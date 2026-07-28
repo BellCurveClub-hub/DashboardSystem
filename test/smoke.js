@@ -45,6 +45,9 @@ function fixtures() {
       { id: "cl3", name: "Someone else's class", subject_id: "sub2", level: "Sec 2", tutor_name: "Ms Ong", room: "R3",
         kind: "fixed", day_of_week: new Date().getDay(), start_time: "19:00", end_time: "20:30", capacity: 6,
         credits_per_session: 1, is_active: true, tutor_id: "u-other" },
+      { id: "cl4", name: "Sec 3 G3 A-Math (Fri)", subject_id: "sub1", level: "Sec 3 G3", tutor_name: "Mr Lim", room: "R1",
+        kind: "fixed", day_of_week: (new Date().getDay() + 1) % 7, start_time: "18:00", end_time: "19:30", capacity: 4,
+        credits_per_session: 1, is_active: true, tutor_id: UID.tutor },
     ],
     sessions: [
       { id: "se1", class_id: "cl1", session_date: D(), start_time: "16:00", end_time: "17:30", capacity: 8,
@@ -55,8 +58,13 @@ function fixtures() {
         status: "completed", is_bookable: false, tutor_name: "Mr Lim", room: "R1", notes: null },
       { id: "se4", class_id: "cl3", session_date: D(), start_time: "19:00", end_time: "20:30", capacity: 6,
         status: "scheduled", is_bookable: false, tutor_name: "Ms Ong", room: "R3", notes: null, tutor_id: "u-other" },
+      { id: "se5", class_id: "cl4", session_date: plus(2), start_time: "18:00", end_time: "19:30", capacity: 4,
+        status: "scheduled", is_bookable: false, tutor_name: "Mr Lim", room: "R1", notes: null },
     ],
-    enrolments: [{ id: "en1", student_id: "st1", class_id: "cl1", start_date: plus(-60), end_date: null, status: "active" }],
+    enrolments: [
+      { id: "en1", student_id: "st1", class_id: "cl1", start_date: plus(-60), end_date: null, status: "active" },
+      { id: "en2", student_id: "st2", class_id: "cl4", start_date: plus(-10), end_date: null, status: "active" },
+    ],
     bookings: [
       { id: "bk1", session_id: "se2", student_id: "st2", status: "requested", booked_by: UID.parent, note: "", created_at: new Date().toISOString() },
       { id: "bk2", session_id: "se2", student_id: "st1", status: "confirmed", booked_by: UID.parent, note: "", created_at: new Date().toISOString() },
@@ -361,6 +369,11 @@ async function runRole(roleName, userId, empty) {
       /Someone else/.test(w.document.querySelector("#view").textContent));
   }
   if (roleName === "parent" && !empty) {
+    w.location.hash = "#/book"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    const btxt = w.document.querySelector("#view").textContent;
+    check("open fixed class with a spare seat shows up in Book a slot", /Sec 3 G3 A-Math \(Fri\)/.test(btxt));
+    check("shows how many seats are left", /3 seats left/.test(btxt));
+
     w.location.hash = "#/billing"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
     const p = w.document.querySelector('[data-act="print-invoice"]');
     check("parent can open the invoice", !!p);

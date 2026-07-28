@@ -159,7 +159,8 @@ tutor self sign-up gated behind admin approval (see below) · self-service
 change email, change password and (pending SMS provider setup) phone
 verification in My account · lesson reports from the register: topics
 covered graded per student, a free-text summary, and inline homework (see
-below).
+below) · Book a slot also surfaces fixed classes with a spare seat, not
+just dedicated ad-hoc sessions (see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -173,6 +174,18 @@ since that's already the after-lesson touchpoint — no separate screen.
 - Homework can be assigned inline to everyone in the register in the same
   save, reusing the bulk-assign-to-class insert `homeworkForm` already does.
 - All three are optional — leaving them blank behaves exactly as before.
+
+**Drop-in booking for fixed classes.** `request_booking()` no longer only
+honours `is_bookable` — a `fixed`-kind class with a spare seat (active
+enrolments under its capacity) is bookable too, without needing a
+permanent enrolment. Blocked if the student is already enrolled in that
+class (nothing to drop into) or it's full. The confirm/waitlist capacity
+check now counts enrolled students plus existing confirmed bookings
+against the session's capacity, not bookings alone, since a fixed class's
+real headcount is mostly enrolled students who never show up as bookings.
+`bookableView` only offers this for a subject the student already takes
+elsewhere, matching their level — browsing into a brand new subject this
+way is out of scope for now.
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a

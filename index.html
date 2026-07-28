@@ -991,7 +991,7 @@ end $$;
 -- ---------------------------------------------------------------------------
 create or replace function request_booking(p_session uuid, p_student uuid) returns text
 language plpgsql security definer set search_path = public as $$
-declare v_sess sessions; v_taken int; v_credits numeric; v_status booking_status;
+declare v_sess sessions; v_class classes; v_taken int; v_enrolled int; v_credits numeric; v_status booking_status;
 begin
   if not (is_admin() or p_student in (select my_student_ids())) then
     raise exception 'That is not your student.';
@@ -999,13 +999,27 @@ begin
   select * into v_sess from sessions where id = p_session;
   if v_sess is null then raise exception 'That slot no longer exists.'; end if;
   if v_sess.status <> 'scheduled' then raise exception 'That lesson has been cancelled.'; end if;
-  if not v_sess.is_bookable then raise exception 'That slot is not open for booking.'; end if;
   if (v_sess.session_date + v_sess.start_time) < now() then raise exception 'That slot has already passed.'; end if;
+
+  select * into v_class from classes where id = v_sess.class_id;
+  select count(*) into v_enrolled from enrolments where class_id = v_sess.class_id and status = 'active';
+
+  -- a fixed class with a spare seat is bookable as a drop-in even when
+  -- is_bookable was never set for it -- that flag still gates ad-hoc slots
+  if v_class.kind = 'fixed' then
+    if exists (select 1 from enrolments where student_id = p_student and class_id = v_sess.class_id and status = 'active') then
+      raise exception 'Already enrolled in this class.';
+    end if;
+    if v_enrolled >= v_class.capacity then raise exception 'That class is full.'; end if;
+  elsif not v_sess.is_bookable then
+    raise exception 'That slot is not open for booking.';
+  end if;
 
   select credits into v_credits from students where id = p_student;
   if coalesce(v_credits, 0) <= 0 then raise exception 'No lesson credits left — top up first.'; end if;
 
   select count(*) into v_taken from bookings where session_id = p_session and status = 'confirmed';
+  if v_class.kind = 'fixed' then v_taken := v_taken + v_enrolled; end if;
 
   if setting_int('booking_auto_confirm', 1) = 1 then
     v_status := case when v_taken < v_sess.capacity then 'confirmed'::booking_status else 'waitlisted'::booking_status end;
@@ -4024,14 +4038,36 @@ PARENT.schedule = async function (view) {
 async function bookableView(view) {
   if (!state.students.length) return noStudentYet(view);
   const s = currentStudent();
-  const [sessions, classes, mine, reports] = await Promise.all([
+  const [adhocSessions, classes, mine, reports, myEnrols, allEnrols] = await Promise.all([
     sel("sessions", q => q.eq("is_bookable", true).eq("status", "scheduled")
       .gte("session_date", today()).lte("session_date", addDays(today(), 42)).order("session_date").order("start_time")),
-    sel("classes"),
+    sel("classes", q => q.eq("is_active", true)),
     sel("bookings", q => q.eq("student_id", s.id).in("status", ["requested", "confirmed", "waitlisted"])),
     sel("absence_reports", q => q.eq("student_id", s.id)),
+    sel("enrolments", q => q.eq("student_id", s.id).eq("status", "active")),
+    sel("enrolments", q => q.eq("status", "active")),
   ]);
   const cmap = byId(classes);
+
+  // fixed classes with a spare seat, in a subject this student already takes,
+  // matching their level — a drop-in, not a permanent enrolment
+  const myClassIds = myEnrols.map(e => e.class_id);
+  const mySubjects = new Set(myClassIds.map(id => (cmap[id] || {}).subject_id).filter(Boolean));
+  const enrolledCount = {};
+  allEnrols.forEach(e => (enrolledCount[e.class_id] = (enrolledCount[e.class_id] || 0) + 1));
+  const openClasses = classes.filter(c =>
+    c.kind === "fixed" && c.level === s.level && mySubjects.has(c.subject_id) &&
+    !myClassIds.includes(c.id) && (enrolledCount[c.id] || 0) < c.capacity);
+  const seatsLeft = {}; openClasses.forEach(c => (seatsLeft[c.id] = c.capacity - (enrolledCount[c.id] || 0)));
+
+  const openFixedSessions = openClasses.length ? await sel("sessions", q =>
+    q.in("class_id", openClasses.map(c => c.id)).eq("status", "scheduled")
+     .gte("session_date", today()).lte("session_date", addDays(today(), 42))
+     .order("session_date").order("start_time")) : [];
+
+  const seen = {};
+  const sessions = adhocSessions.concat(openFixedSessions).filter(x => (seen[x.id] ? false : (seen[x.id] = true)));
+
   const taken = {}; mine.forEach(b => (taken[b.session_id] = b));
   const noCredits = Number(s.credits) <= 0;
   const makeup = reports.filter(r => !r.redeemed_booking_id).sort((a, b) => a.reported_at.localeCompare(b.reported_at))[0] || null;
@@ -4041,6 +4077,7 @@ async function bookableView(view) {
   const rows = sessions.map(x => {
     const c = cmap[x.class_id] || {};
     const b = taken[x.id];
+    const isOpenClass = seatsLeft[x.class_id] !== undefined;
     let button = '<button class="btn btn-sm btn-mint" data-act="request-booking" data-id="' + x.id + '"' +
       (noCredits ? " disabled" : "") + ">Request</button>";
     if (!b && makeup) {
@@ -4048,7 +4085,8 @@ async function bookableView(view) {
         (noCredits ? " disabled" : "") + '>Book — covers ' + esc(makeupDate) + " absence</button>";
     }
     return "<tr><td><b>" + esc(fmtDate(x.session_date)) + "</b><br>" + esc(fmtRange(x.start_time, x.end_time)) + "</td>" +
-      "<td>" + esc(c.name || "Class") + "<br><span style='color:var(--ink-faint);font-size:12px'>" + esc(c.level || "") + "</span></td>" +
+      "<td>" + esc(c.name || "Class") + "<br><span style='color:var(--ink-faint);font-size:12px'>" + esc(c.level || "") + "</span>" +
+      (isOpenClass ? ' <span class="pill info">' + seatsLeft[x.class_id] + " seat" + (seatsLeft[x.class_id] === 1 ? "" : "s") + " left</span>" : "") + "</td>" +
       "<td>" + esc(x.tutor_name || c.tutor_name || "—") + "</td>" +
       '<td class="num">' + c.credits_per_session + "</td>" +
       '<td class="act">' + (b
@@ -4057,7 +4095,7 @@ async function bookableView(view) {
   });
 
   view.innerHTML =
-    pageHead("Book a slot", "Open sessions you can ask for") + studentTabs() +
+    pageHead("Book a slot", "Open sessions and classes with a spare seat") + studentTabs() +
     (noCredits ? '<div class="note bad">' + esc(s.full_name) + " has no lesson credits left. Top up before booking.</div>" : "") +
     (makeup ? '<div class="note hl">A missed lesson on ' + esc(makeupDate) +
       " was reported in advance — book any slot below to make it up.</div>" : "") +
