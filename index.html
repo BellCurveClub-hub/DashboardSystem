@@ -1239,6 +1239,9 @@ language sql stable security definer set search_path = public as $$
                   where id = auth.uid() and role::text in ('admin','tutor'));
 $$;
 
+alter table classes  add column if not exists tutor_id uuid references profiles(id) on delete set null;
+alter table sessions add column if not exists tutor_id uuid references profiles(id) on delete set null;
+
 -- The students a tutor actually teaches: enrolled in one of their classes, or
 -- booked into one of their sessions.
 create or replace function my_taught_student_ids() returns setof uuid
@@ -1252,9 +1255,6 @@ language sql stable security definer set search_path = public as $$
     join classes c2 on c2.id = se.class_id
    where b.status = 'confirmed' and coalesce(se.tutor_id, c2.tutor_id) = auth.uid();
 $$;
-
-alter table classes  add column if not exists tutor_id uuid references profiles(id) on delete set null;
-alter table sessions add column if not exists tutor_id uuid references profiles(id) on delete set null;
 
 -- --------------------------------------------------------- grading scales --
 create table if not exists grading_scales (
