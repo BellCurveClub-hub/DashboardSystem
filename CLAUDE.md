@@ -275,6 +275,19 @@ actually take it, and lets the parent pick one or both:
 - **Request a lesson** (the custom-proposal form) got the same "For"
   checkbox list, since a proposal isn't gated by subject at all.
 
+**Confirm-your-email screen after sign-up.** `db.auth.signUp()` returns a
+`session` only when the project does *not* require email confirmation; when
+confirmation is on, it comes back with a `user` but no `session`, and the
+old code silently fell back to the plain sign-in screen with no explanation
+of what just happened. `signUp()` now returns whether a session came back;
+`do-signup` checks that instead of assuming success means "signed in" —
+if there's no session it sets `state.pendingConfirmEmail` and renders
+`renderConfirmPending()` (same `.gate`/`.gate-card` markup as the sign-in
+screen) instead of calling `loadMe()`. "Back to sign in" just clears the
+flag and returns to the normal auth screen. If the Supabase project ever
+has confirmation switched off, `hasSession` is `true` and this screen never
+shows — behaviour is unchanged for that config.
+
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a
 makeup isn't a new balance or ledger, just a record that notice was given.

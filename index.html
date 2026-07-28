@@ -2192,6 +2192,7 @@ const state = {
   settings: {},
   phoneCodeSent: false,
   progressSubject: "all",
+  pendingConfirmEmail: null,
 };
 
 /* ---------------------------------------------------------------- helpers -- */
@@ -2437,11 +2438,14 @@ async function signIn(email, password) {
   if (error) throw error;
 }
 async function signUp(email, password, fullName, phone, role) {
-  const { error } = await db.auth.signUp({
+  const { data, error } = await db.auth.signUp({
     email, password,
     options: { data: { full_name: fullName, phone: phone, role: role } },
   });
   if (error) throw error;
+  // no session back means email confirmation is switched on and pending —
+  // there's nothing to sign the person into yet
+  return !!(data && data.session);
 }
 async function signOut() {
   await db.auth.signOut();
@@ -2623,6 +2627,20 @@ function renderAuth() {
     "</div></div>";
 }
 
+/* ---------------------------------------------------- confirm email gate -- */
+function renderConfirmPending() {
+  root().innerHTML =
+    '<div class="gate"><div class="gate-card">' +
+      '<div class="gate-head"><div class="mark">' + brandMark("Check your email") + "</div></div>" +
+      '<div class="gate-body">' +
+        "<p>We've sent a confirmation link to <b>" + esc(state.pendingConfirmEmail) + "</b>.</p>" +
+        "<p>Click the link in that email to confirm your address, then come back here and sign in.</p>" +
+        '<div class="btn-row"><button class="btn btn-primary btn-lg" data-act="confirm-pending-done">Back to sign in</button></div>' +
+      "</div>" +
+      '<div class="gate-foot">' + esc(state.settings.centre_name || CONFIG.CENTRE_NAME) + " · Singapore</div>" +
+    "</div></div>";
+}
+
 /* ------------------------------------------------------- profile not ready -- */
 function renderNoProfile() {
   root().innerHTML =
@@ -2707,6 +2725,7 @@ function table(headers, rows) {
 /* ------------------------------------------------------------ main render -- */
 async function render() {
   if (!db) return renderConfigGate();
+  if (!state.user && state.pendingConfirmEmail) return renderConfirmPending();
   if (!state.user) return renderAuth();
   if (!state.profile) return renderNoProfile();
 
@@ -5538,10 +5557,20 @@ const ACTIONS = {
     if (!v.name || !v.email || v.pw.length < 6) return toast("Name, email and a password of at least 6 characters.", "bad");
     if (v.pw !== v.pw2) return toast("Passwords don't match.", "bad");
     try {
-      await signUp(v.email, v.pw, v.name, v.phone, v.role);
-      toast("Account created. Check your email if confirmation is switched on.", "ok");
-      await loadMe(); render();
+      const hasSession = await signUp(v.email, v.pw, v.name, v.phone, v.role);
+      if (hasSession) {
+        toast("Account created.", "ok");
+        await loadMe(); render();
+      } else {
+        state.pendingConfirmEmail = v.email;
+        render();
+      }
     } catch (e) { fail(e); }
+  },
+  "confirm-pending-done": () => {
+    state.pendingConfirmEmail = null;
+    authTab = "in";
+    render();
   },
   "do-reset": async () => {
     const f = $("#f_email");
