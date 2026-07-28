@@ -344,6 +344,27 @@ async function runRole(roleName, userId, empty) {
     w.location.hash = "#/schedule"; await w.eval("render()"); await new Promise(r => setTimeout(r, 60));
     await tryClick('[data-act="session-detail"]');
     await tryClick('[data-act="new-session"]');
+
+    // --- schedule gap rule: reject an awkward ~1h gap, allow a clean 30-min one ---
+    // se1 (cl1, Mr Lim) runs 16:00-17:30 today
+    w.document.querySelector('[data-act="new-session"]').click();
+    await new Promise(r => setTimeout(r, 100));
+    w.document.querySelector("#f_class_id").value = "cl1";
+    w.document.querySelector("#f_tutor_id").value = UID.tutor;
+    w.document.querySelector("#f_start_time").value = "14:30";
+    w.document.querySelector("#f_end_time").value = "15:00";
+    const sessionCountBefore = DB.sessions.length;
+    w.document.querySelector('[data-act="modal-save"]').click();
+    await new Promise(r => setTimeout(r, 100));
+    check("a 1-hour gap before an existing lesson (same tutor) is rejected",
+      DB.sessions.length === sessionCountBefore && !!w.document.querySelector(".modal"));
+    w.document.querySelector("#f_start_time").value = "15:00";
+    w.document.querySelector("#f_end_time").value = "15:30";
+    w.document.querySelector('[data-act="modal-save"]').click();
+    await new Promise(r => setTimeout(r, 100));
+    check("a clean 30-minute gap before an existing lesson is allowed",
+      DB.sessions.length === sessionCountBefore + 1 && !w.document.querySelector(".modal"));
+
     w.location.hash = "#/attendance"; await w.eval("render()"); await new Promise(r => setTimeout(r, 60));
     await tryClick('[data-act="take-attendance"]');
 

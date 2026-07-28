@@ -3183,6 +3183,10 @@ async function sessionForm(sess) {
       const v = modalValues();
       if (!v.class_id) return toast("Choose a class first.", "bad");
       if (!v.tutor_id) v.tutor_id = null;
+      if (v.tutor_id) {
+        const gapErr = await checkScheduleGap(v.tutor_id, v.session_date, v.start_time, v.end_time, sess ? sess.id : null);
+        if (gapErr) return toast(gapErr, "bad");
+      }
       try {
         if (sess) await upd("sessions", sess.id, v); else await ins("sessions", v);
         closeModal(); toast("Slot saved.", "ok"); render();
@@ -3195,6 +3199,46 @@ function addMinutesToTime(t, mins) {
   const [h, m] = t.slice(0, 5).split(":").map(Number);
   const total = ((h * 60 + m + mins) % 1440 + 1440) % 1440;
   return String(Math.floor(total / 60)).padStart(2, "0") + ":" + String(total % 60).padStart(2, "0");
+}
+
+// A tutor's day shouldn't end up with a gap that's too short to be useful
+// and too long to be tight — either back-to-back, a quick 30-minute
+// buffer, or a proper 1.5h+ break, nothing in between. Checked only where
+// a brand new time is being chosen (an ad-hoc slot, or accepting a custom
+// lesson request) against that same tutor's other sessions that day — a
+// fixed class's own recurring sessions just repeat its template, so
+// there's no new placement decision being made for those.
+async function checkScheduleGap(tutorId, date, startTime, endTime, excludeSessionId) {
+  if (!tutorId) return null;
+  const [sessions, classes] = await Promise.all([
+    sel("sessions", q => q.eq("session_date", date).eq("status", "scheduled")),
+    sel("classes"),
+  ]);
+  const cmap = byId(classes);
+  const toMin = t => { const [h, m] = t.slice(0, 5).split(":").map(Number); return h * 60 + m; };
+  const startMin = toMin(startTime), endMin = toMin(endTime);
+  const others = sessions
+    .filter(s => s.id !== excludeSessionId && (s.tutor_id || (cmap[s.class_id] || {}).tutor_id) === tutorId)
+    .map(s => ({
+      start: toMin(s.start_time), end: toMin(s.end_time), start_time: s.start_time, end_time: s.end_time,
+      name: (cmap[s.class_id] || {}).name || "that lesson",
+    }));
+
+  const overlap = others.find(o => startMin < o.end && endMin > o.start);
+  if (overlap) return "That overlaps " + overlap.name + " (" + fmtRange(overlap.start_time, overlap.end_time) + ") for the same tutor.";
+
+  const validGap = mins => mins === 0 || mins === 30 || mins >= 90;
+  const before = others.filter(o => o.end <= startMin).sort((a, b) => b.end - a.end)[0];
+  if (before && !validGap(startMin - before.end)) {
+    return "Leaves a " + (startMin - before.end) + "-minute gap after " + before.name + " (" + fmtRange(before.start_time, before.end_time) +
+      ") — back-to-back, a 30-minute break, or at least 1.5 hours, not in between.";
+  }
+  const after = others.filter(o => o.start >= endMin).sort((a, b) => a.start - b.start)[0];
+  if (after && !validGap(after.start - endMin)) {
+    return "Leaves a " + (after.start - endMin) + "-minute gap before " + after.name + " (" + fmtRange(after.start_time, after.end_time) +
+      ") — back-to-back, a 30-minute break, or at least 1.5 hours, not in between.";
+  }
+  return null;
 }
 
 /* Accepting a custom lesson request creates the actual session, confirms a
@@ -3233,6 +3277,10 @@ async function scheduleLessonRequest(requestId) {
     onSave: async () => {
       const v = modalValues();
       if (!v.class_id) return toast("Choose a class first.", "bad");
+      if (v.tutor_id) {
+        const gapErr = await checkScheduleGap(v.tutor_id, v.session_date, v.start_time, v.end_time, null);
+        if (gapErr) return toast(gapErr, "bad");
+      }
       try {
         const tutorProfile = tutors.find(t => t.id === v.tutor_id);
         await ins("sessions", {

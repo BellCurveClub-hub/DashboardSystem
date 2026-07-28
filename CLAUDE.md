@@ -428,6 +428,35 @@ student, but a tutor sign-up never lands as `tutor` directly.
 - Admin accounts still can't be self-signed-up for — that hint stays on the
   sign-up form.
 
+**Schedule gap rule.** A tutor's day shouldn't end up with a gap that's too
+short to be useful and too long to be tight — a considered decision, not
+an oversight: any gap must be back-to-back (0), a quick 30-minute buffer,
+or at least 1.5 hours, never something in between (an "awkward wasted
+hour" is exactly what this exists to catch). `checkScheduleGap(tutorId,
+date, startTime, endTime, excludeSessionId)` checks a proposed time
+against that same tutor's other `scheduled` sessions that day — nearest
+before and nearest after — and also rejects a straight overlap.
+
+- Checked only in the two places a brand new time actually gets chosen:
+  `sessionForm` (adding or editing an ad-hoc slot) and
+  `scheduleLessonRequest` (accepting a custom lesson request). A fixed
+  class's own recurring sessions just repeat its weekly template — no new
+  placement decision is being made when `generate_sessions()` stamps them
+  out, so it isn't checked there.
+- Silently skipped when no tutor is picked (`tutor_id` blank) — there's no
+  specific person's day to protect against a bad gap yet.
+- Client-side only, like the rest of session CRUD (admin-only, gated by
+  RLS `is_admin()` directly on `sessions`, no RPC layer) — consistent with
+  how `sessionForm` already worked before this.
+- Considered and rejected: a rigid "2-hour block" grid instead (offer
+  hourly slots until the first booking of the day, then collapse
+  everything else to blocks anchored to it). Looked simpler at first but
+  actually assumes every lesson is 2 hours (existing classes are 1.5h),
+  and the anchor depends on booking order — the exact same day filled in
+  a different order lands on a different grid, which is a strange thing
+  to explain six months from now. The plain gap rule needed no schema
+  change and no new state.
+
 **Next, in order:**
 
 1. Term and holiday calendar — decided: a marked holiday blocks families from
