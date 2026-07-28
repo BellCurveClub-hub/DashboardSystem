@@ -149,20 +149,38 @@ credit and point effects · students, enrolments and ledgers · packages,
 invoices, manual payment recording, printable invoice/receipt · reward shelf
 and redemption queue · homework assign/submit/grade · topic proficiency
 scoring · test results (centre and school) with grading scales, approval
-queue and report-slip storage · CSV exports · settings.
+queue and report-slip storage · CSV exports · settings · makeup lessons for
+absences (see below).
+
+**Makeup lessons.** A missed fixed-class session never actually costs a
+credit — the attendance trigger only charges on `present`/`late` — so a
+makeup isn't a new balance or ledger, just a record that notice was given.
+
+- A family reports an absence, ahead of time, for a session in one of the
+  student's active fixed-class enrolments: `report_absence(session, student)`.
+  It requires at least `cancel_hours` notice (the same setting `cancel_booking`
+  already uses) and refuses ad-hoc sessions — those already have
+  `cancel_booking`.
+- `redeem_makeup(report, session)` is `request_booking()` plus a link back to
+  the report, so both sides can see which open slot made up which missed
+  lesson. It still requires a spare credit, same as any booking — the family
+  already has one, since the missed lesson was never charged.
+- `absence_reports` is a normal family-read / RPC-write table, same pattern as
+  `bookings`.
+- Parents see a "Report absence" button on upcoming fixed sessions
+  (Schedule) and, once reported, the Book-a-slot buttons switch to "covers
+  the missed lesson." Admins/tutors see an "absence reported" pill in the
+  attendance register.
+- Not built: any cap on how many makeups a student can bank, or an expiry —
+  by design, they don't expire, same as credits.
 
 **Next, in order:**
 
-1. Makeup lessons for absences
-2. Term and holiday calendar
-3. Announcements to parents
-4. Notification centre (in-app) and the email sender
-
-**Open questions to ask before starting makeups:**
-
-- What entitles a student to a makeup — any absence, or only one with notice?
-- Should a holiday block families from booking, or only stop sessions being
-  generated?
+1. Term and holiday calendar — decided: a marked holiday blocks families from
+   booking any slot on that date (including ad-hoc bookable ones), not just
+   suppress auto-generation of recurring sessions.
+2. Announcements to parents
+3. Notification centre (in-app) and the email sender
 
 **Deferred on purpose — do not build until asked:**
 

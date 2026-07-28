@@ -5,7 +5,7 @@
   "description": "Centre portal for Bell Curve Club — one static page on Supabase.",
   "scripts": {
     "test": "node test/smoke.js",
-    "test:empty": "EMPTY=1 node test/smoke.js"
+    "test:empty": "node test/smoke.js --empty"
   },
   "devDependencies": {
     "jsdom": "^24.0.0"

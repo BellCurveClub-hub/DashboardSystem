@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const { JSDOM, VirtualConsole } = require("jsdom");
 
-const EMPTY = process.env.EMPTY === "1";
+const EMPTY = process.env.EMPTY === "1" || process.argv.includes("--empty");
 const PAGE = path.join(__dirname, "..", "index.html");
 
 const D = () => {
