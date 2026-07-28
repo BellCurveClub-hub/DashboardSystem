@@ -160,7 +160,9 @@ change email, change password and (pending SMS provider setup) phone
 verification in My account · lesson reports from the register: topics
 covered graded per student, a free-text summary, and inline homework (see
 below) · Book a slot also surfaces fixed classes with a spare seat, not
-just dedicated ad-hoc sessions (see below).
+just dedicated ad-hoc sessions (see below) · families can propose a custom
+day/time nothing else covers, admin accepts and schedules it or declines
+(see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -186,6 +188,21 @@ real headcount is mostly enrolled students who never show up as bookings.
 `bookableView` only offers this for a subject the student already takes
 elsewhere, matching their level — browsing into a brand new subject this
 way is out of scope for now.
+
+**Custom lesson requests.** For a day and time nothing already covers —
+there's no session to book into, so this is a separate proposal, not a
+booking. `lesson_requests`: subject, a preferred date and time, an optional
+note. A family inserts directly (RLS `p_ins`, no RPC — there's no
+capacity/credit/stock rule to enforce at proposal time the way there is
+for an actual booking). Reviewed on the same **Booking requests** page as
+ordinary bookings, in its own "Custom lesson requests waiting" card.
+Accepting (`scheduleLessonRequest`) does three things in one save: creates
+the actual `sessions` row, confirms a `bookings` row for the student, and
+marks the request `scheduled` with `session_id` set. Declining just marks
+it `declined` — no session, no booking. `sessionForm` gained a real
+`tutor_id` picker for this (it only ever had a free-text `tutor_name`
+before) — allocating a tutor needs to be a real account link, or the
+tutor would never see the lesson on their own dashboard.
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a

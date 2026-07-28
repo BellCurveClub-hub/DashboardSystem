@@ -1837,6 +1837,45 @@ create policy p_write on lesson_topic_grades for all using (is_admin()) with che
 create policy p_tutor on lesson_topic_grades for all
   using (is_tutor() and student_id in (select my_taught_student_ids()))
   with check (is_tutor() and student_id in (select my_taught_student_ids()));
+
+-- ===========================================================================
+-- PART 6 — Requesting a custom ad-hoc lesson
+-- Added after the first release. Safe to run on an existing database.
+--
+-- For a day and time nothing already covers. A family proposes a subject,
+-- date and time; nothing is booked yet -- there's no session to book into.
+-- An admin reviews it on the same Booking requests page as ordinary
+-- bookings, and accepting one creates the actual session, assigns a tutor,
+-- and confirms a booking for the student in one step.
+-- ===========================================================================
+create table if not exists lesson_requests (
+  id             uuid primary key default gen_random_uuid(),
+  student_id     uuid not null references students(id) on delete cascade,
+  subject_id     uuid references subjects(id) on delete set null,
+  requested_date date not null,
+  requested_time time not null,
+  note           text,
+  status         text not null default 'pending' check (status in ('pending','scheduled','declined')),
+  session_id     uuid references sessions(id) on delete set null,
+  requested_by   uuid references profiles(id) on delete set null,
+  decided_by     uuid references profiles(id) on delete set null,
+  decided_at     timestamptz,
+  created_at     timestamptz not null default now()
+);
+create index if not exists lesson_requests_status_idx on lesson_requests(status);
+
+alter table lesson_requests enable row level security;
+drop policy if exists p_read on lesson_requests;
+drop policy if exists p_ins  on lesson_requests;
+drop policy if exists p_upd  on lesson_requests;
+
+-- a family proposes one for their own student and reads their own; only an
+-- admin decides it -- there's no business rule to enforce at insert time
+-- (no capacity, credit or stock check applies to a proposal), so this
+-- doesn't need an RPC the way booking an actual slot does
+create policy p_read on lesson_requests for select using (is_admin() or student_id in (select my_student_ids()));
+create policy p_ins  on lesson_requests for insert with check (is_admin() or student_id in (select my_student_ids()));
+create policy p_upd  on lesson_requests for update using (is_admin()) with check (is_admin());
 `;
 
 /* ============================================================================
@@ -2598,10 +2637,11 @@ async function render() {
 async function refreshBadges() {
   try {
     const b = await db.from("bookings").select("id", { count: "exact", head: true }).eq("status", "requested");
+    const l = await db.from("lesson_requests").select("id", { count: "exact", head: true }).eq("status", "pending");
     const r = await db.from("redemptions").select("id", { count: "exact", head: true }).eq("status", "pending");
     const a = await db.from("assessments").select("id", { count: "exact", head: true }).eq("status", "pending");
     const p = await db.from("profiles").select("id", { count: "exact", head: true }).eq("role", "pending_tutor");
-    const next = { bookings: b.count || 0, redemptions: r.count || 0, assessments: a.count || 0, pendingTutors: p.count || 0 };
+    const next = { bookings: (b.count || 0) + (l.count || 0), redemptions: r.count || 0, assessments: a.count || 0, pendingTutors: p.count || 0 };
     if (next.bookings !== state.counts.bookings || next.redemptions !== state.counts.redemptions
         || next.assessments !== state.counts.assessments || next.pendingTutors !== state.counts.pendingTutors) {
       state.counts = next;
@@ -2798,7 +2838,10 @@ async function sessionDetail(id) {
 
 /* --------------------------------------------------------- new/edit slot ---- */
 async function sessionForm(sess) {
-  const classes = await sel("classes", q => q.eq("is_active", true).order("name"));
+  const [classes, tutors] = await Promise.all([
+    sel("classes", q => q.eq("is_active", true).order("name")),
+    sel("profiles", q => q.in("role", ["tutor", "admin"]).order("full_name")),
+  ]);
   const opts = classes.map(c => ({ value: c.id, label: c.name + (c.level ? " · " + c.level : "") }));
   openModal({
     title: sess ? "Edit the slot" : "Add a slot",
@@ -2811,14 +2854,16 @@ async function sessionForm(sess) {
       "</div>" +
       '<div class="grid-3">' +
         fText("capacity", "Seats", sess ? sess.capacity : 8, { type: "number", min: 1 }) +
-        fText("tutor_name", "Tutor", sess ? sess.tutor_name : "") +
+        fSelect("tutor_id", "Tutor account", sess ? sess.tutor_id : "", tutors.map(t => ({ value: t.id, label: t.full_name })), { blank: "—" }) +
         fText("room", "Room", sess ? sess.room : "") +
       "</div>" +
+      fText("tutor_name", "Tutor name shown to families", sess ? sess.tutor_name : "") +
       fCheck("is_bookable", "Families may request this slot themselves", sess ? sess.is_bookable : true) +
       fArea("notes", "Note shown to families", sess ? sess.notes : ""),
     onSave: async () => {
       const v = modalValues();
       if (!v.class_id) return toast("Choose a class first.", "bad");
+      if (!v.tutor_id) v.tutor_id = null;
       try {
         if (sess) await upd("sessions", sess.id, v); else await ins("sessions", v);
         closeModal(); toast("Slot saved.", "ok"); render();
@@ -2827,14 +2872,82 @@ async function sessionForm(sess) {
   });
 }
 
+function addMinutesToTime(t, mins) {
+  const [h, m] = t.slice(0, 5).split(":").map(Number);
+  const total = ((h * 60 + m + mins) % 1440 + 1440) % 1440;
+  return String(Math.floor(total / 60)).padStart(2, "0") + ":" + String(total % 60).padStart(2, "0");
+}
+
+/* Accepting a custom lesson request creates the actual session, confirms a
+   booking for the requesting student, and closes out the request — all in
+   one save, since none of it exists yet. */
+async function scheduleLessonRequest(requestId) {
+  const r = (await sel("lesson_requests", q => q.eq("id", requestId)))[0];
+  if (!r) return toast("That request no longer exists.", "bad");
+  const [student, subject, classes, tutors] = await Promise.all([
+    sel("students", q => q.eq("id", r.student_id)).then(x => x[0]),
+    r.subject_id ? sel("subjects", q => q.eq("id", r.subject_id)).then(x => x[0]) : null,
+    sel("classes", q => q.eq("is_active", true).order("name")),
+    sel("profiles", q => q.in("role", ["tutor", "admin"]).order("full_name")),
+  ]);
+  const opts = classes.slice().sort((a, b) => (b.subject_id === r.subject_id) - (a.subject_id === r.subject_id))
+    .map(c => ({ value: c.id, label: c.name + (c.level ? " · " + c.level : "") }));
+
+  openModal({
+    title: "Schedule " + (subject ? subject.name : "a lesson") + " for " + (student ? student.full_name : "—"),
+    body:
+      '<div class="note">Requested ' + esc(fmtDate(r.requested_date)) + " " + esc(fmtTime(r.requested_time)) +
+        (r.note ? "<br>" + esc(r.note) : "") + "</div>" +
+      fSelect("class_id", "Class", "", opts, { blank: "Choose a class", hint: "Classes in the requested subject are listed first." }) +
+      '<div class="grid-3">' +
+        fText("session_date", "Date", r.requested_date, { type: "date" }) +
+        fText("start_time", "Starts", r.requested_time.slice(0, 5), { type: "time" }) +
+        fText("end_time", "Ends", addMinutesToTime(r.requested_time, 90), { type: "time" }) +
+      "</div>" +
+      '<div class="grid-3">' +
+        fText("capacity", "Seats", 8, { type: "number", min: 1 }) +
+        fSelect("tutor_id", "Tutor account", "", tutors.map(t => ({ value: t.id, label: t.full_name })), { blank: "—" }) +
+        fText("room", "Room", "") +
+      "</div>",
+    onSave: async () => {
+      const v = modalValues();
+      if (!v.class_id) return toast("Choose a class first.", "bad");
+      try {
+        const tutorProfile = tutors.find(t => t.id === v.tutor_id);
+        await ins("sessions", {
+          class_id: v.class_id, session_date: v.session_date, start_time: v.start_time, end_time: v.end_time,
+          capacity: v.capacity, tutor_id: v.tutor_id || null, tutor_name: tutorProfile ? tutorProfile.full_name : null,
+          room: v.room, is_bookable: false, status: "scheduled",
+        });
+        // sessions has no other identifying field back from insert, so look
+        // it up by the (class_id, session_date, start_time) unique triple
+        const newSession = (await sel("sessions", q =>
+          q.eq("class_id", v.class_id).eq("session_date", v.session_date).eq("start_time", v.start_time)))[0];
+        if (!newSession) throw new Error("Could not find the newly created session.");
+        await ins("bookings", { session_id: newSession.id, student_id: r.student_id, status: "confirmed", booked_by: state.user.id });
+        await upd("lesson_requests", r.id, {
+          status: "scheduled", session_id: newSession.id, decided_by: state.user.id, decided_at: new Date().toISOString(),
+        });
+        closeModal(); toast("Lesson scheduled.", "ok"); render();
+      } catch (e) { fail(e); }
+    },
+  });
+}
+
 /* ------------------------------------------------------------- BOOKINGS ---- */
 ADMIN.bookings = async function (view) {
   const bookings = await sel("bookings", q => q.order("created_at", { ascending: false }).limit(200));
-  const [students, sessions, classes] = await Promise.all([sel("students"), sel("sessions"), sel("classes")]);
-  const smap = byId(students), semap = byId(sessions), cmap = byId(classes);
+  const [students, sessions, classes, lessonRequests, subjects] = await Promise.all([
+    sel("students"), sel("sessions"), sel("classes"),
+    sel("lesson_requests", q => q.order("created_at", { ascending: false }).limit(100)),
+    sel("subjects"),
+  ]);
+  const smap = byId(students), semap = byId(sessions), cmap = byId(classes), subjmap = byId(subjects);
 
   const grp = { requested: [], confirmed: [], other: [] };
   bookings.forEach(b => (grp[b.status] ? grp[b.status] : grp.other).push(b));
+  const pendingRequests = lessonRequests.filter(r => r.status === "pending");
+  const decidedRequests = lessonRequests.filter(r => r.status !== "pending");
 
   const rowFor = (b, withActions) => {
     const s = semap[b.session_id] || {};
@@ -2852,8 +2965,25 @@ ADMIN.bookings = async function (view) {
       "</td></tr>";
   };
 
+  const requestRow = (r, withActions) => {
+    const subj = subjmap[r.subject_id];
+    const pill = r.status === "scheduled" ? "ok" : r.status === "declined" ? "bad" : "warn";
+    return "<tr><td><b>" + esc(nameOf(smap, r.student_id)) + "</b></td>" +
+      "<td>" + esc(subj ? subj.name : "—") + "</td>" +
+      "<td>" + esc(fmtDate(r.requested_date)) + " " + esc(fmtTime(r.requested_time)) + "</td>" +
+      "<td>" + esc(r.note || "") + "</td>" +
+      '<td><span class="pill ' + pill + '">' + esc(r.status) + "</span></td>" +
+      '<td class="act">' + (withActions
+        ? '<button class="btn btn-sm btn-mint" data-act="lesson-request-accept" data-id="' + r.id + '">Accept & schedule</button> ' +
+          '<button class="btn btn-sm btn-danger" data-act="lesson-request-decline" data-id="' + r.id + '">Decline</button>'
+        : "") + "</td></tr>";
+  };
+
   view.innerHTML =
-    pageHead("Booking requests", "Families asking for a place in an open slot") +
+    pageHead("Booking requests", "Families asking for a place in an open slot, or proposing a new one") +
+    card("Custom lesson requests waiting (" + pendingRequests.length + ")",
+      pendingRequests.length ? table(["Student", "Subject", "Requested", "Note", "Status", ""], pendingRequests.map(r => requestRow(r, true)))
+                             : emptyState("✓", "Nothing waiting", "Appears when a family proposes a day and time nothing else covers."), "", true) +
     card("Waiting for a decision (" + grp.requested.length + ")",
       grp.requested.length ? table(["Student", "Slot", "Note", "Status", ""], grp.requested.map(b => rowFor(b, true)))
                            : emptyState("✓", "Nothing waiting", "New requests appear here as families make them."), "", true) +
@@ -2861,7 +2991,9 @@ ADMIN.bookings = async function (view) {
       ? table(["Student", "Slot", "Note", "Status", ""], grp.confirmed.slice(0, 60).map(b => rowFor(b, false)))
       : emptyState("▦", "No confirmed bookings yet", ""), "", true) +
     (grp.other.length ? card("Declined, cancelled and waitlisted",
-      table(["Student", "Slot", "Note", "Status", ""], grp.other.slice(0, 40).map(b => rowFor(b, false))), "", true) : "");
+      table(["Student", "Slot", "Note", "Status", ""], grp.other.slice(0, 40).map(b => rowFor(b, false))), "", true) : "") +
+    (decidedRequests.length ? card("Past lesson requests",
+      table(["Student", "Subject", "Requested", "Note", "Status", ""], decidedRequests.slice(0, 30).map(r => requestRow(r, false))), "", true) : "");
 };
 
 /* ----------------------------------------------------------- ATTENDANCE ---- */
@@ -4038,7 +4170,7 @@ PARENT.schedule = async function (view) {
 async function bookableView(view) {
   if (!state.students.length) return noStudentYet(view);
   const s = currentStudent();
-  const [adhocSessions, classes, mine, reports, myEnrols, allEnrols] = await Promise.all([
+  const [adhocSessions, classes, mine, reports, myEnrols, allEnrols, myRequests, subjects] = await Promise.all([
     sel("sessions", q => q.eq("is_bookable", true).eq("status", "scheduled")
       .gte("session_date", today()).lte("session_date", addDays(today(), 42)).order("session_date").order("start_time")),
     sel("classes", q => q.eq("is_active", true)),
@@ -4046,6 +4178,8 @@ async function bookableView(view) {
     sel("absence_reports", q => q.eq("student_id", s.id)),
     sel("enrolments", q => q.eq("student_id", s.id).eq("status", "active")),
     sel("enrolments", q => q.eq("status", "active")),
+    sel("lesson_requests", q => q.eq("student_id", s.id).order("created_at", { ascending: false }).limit(10)),
+    sel("subjects", q => q.order("name")),
   ]);
   const cmap = byId(classes);
 
@@ -4100,10 +4234,46 @@ async function bookableView(view) {
     (makeup ? '<div class="note hl">A missed lesson on ' + esc(makeupDate) +
       " was reported in advance — book any slot below to make it up.</div>" : "") +
     card("", sessions.length ? table(["When", "Class", "Tutor", { t: "Credits", num: true }, ""], rows)
-      : emptyState("▦", "No open slots right now", "The centre opens slots as they become available."), "", true);
+      : emptyState("▦", "No open slots right now", "The centre opens slots as they become available."), "", true) +
+    card("Don't see a time that works?",
+      "<p class='hint' style='margin-bottom:12px'>Propose a day and time — the centre will confirm it and assign a tutor.</p>" +
+      '<button class="btn btn-mint" data-act="lesson-request">Request a lesson</button>' +
+      (myRequests.length ? "<div class='divider'></div>" + table(["Requested", "Subject", "Status"], myRequests.map(r => {
+        const subj = subjects.find(x => x.id === r.subject_id);
+        const pill = r.status === "scheduled" ? "ok" : r.status === "declined" ? "bad" : "warn";
+        return "<tr><td>" + esc(fmtDate(r.requested_date)) + " " + esc(fmtTime(r.requested_time)) + "</td>" +
+          "<td>" + esc(subj ? subj.name : "—") + "</td>" +
+          '<td><span class="pill ' + pill + '">' + esc(r.status) + "</span></td></tr>";
+      })) : ""));
 }
 PARENT.book = bookableView;
 STUDENT.book = bookableView;
+
+async function lessonRequestForm() {
+  const s = currentStudent();
+  const subjects = await sel("subjects", q => q.order("name"));
+  openModal({
+    title: "Request a lesson for " + s.full_name,
+    body:
+      fSelect("subject_id", "Subject", "", subjects.map(x => ({ value: x.id, label: x.name })), { blank: "— choose —" }) +
+      '<div class="grid-2">' +
+        fText("requested_date", "Preferred date", addDays(today(), 3), { type: "date" }) +
+        fText("requested_time", "Preferred time", "16:00", { type: "time" }) +
+      "</div>" +
+      fArea("note", "Anything the centre should know", ""),
+    onSave: async () => {
+      const v = modalValues();
+      if (!v.subject_id) return toast("Choose a subject.", "bad");
+      try {
+        await ins("lesson_requests", {
+          student_id: s.id, subject_id: v.subject_id, requested_date: v.requested_date,
+          requested_time: v.requested_time, note: v.note, requested_by: state.user.id,
+        });
+        closeModal(); toast("Request sent — the centre will confirm a time.", "ok"); render();
+      } catch (e) { fail(e); }
+    },
+  });
+}
 
 /* --------------------------------------------------------- PARENT: billing -- */
 PARENT.billing = async function (view) {
@@ -5126,6 +5296,14 @@ const ACTIONS = {
     try { await upd("bookings", el.dataset.id, { status: el.dataset.v }); closeModal(); toast("Booking " + el.dataset.v + ".", "ok"); render(); }
     catch (e) { fail(e); }
   },
+  "lesson-request-accept": el => scheduleLessonRequest(el.dataset.id),
+  "lesson-request-decline": async el => {
+    if (!(await confirmBox("Decline this request?", "The family will see it marked declined.", true))) return;
+    try {
+      await upd("lesson_requests", el.dataset.id, { status: "declined", decided_by: state.user.id, decided_at: new Date().toISOString() });
+      toast("Request declined.", "ok"); render();
+    } catch (e) { fail(e); }
+  },
   "request-booking": async el => {
     const s = currentStudent();
     try {
@@ -5160,6 +5338,7 @@ const ACTIONS = {
       render();
     } catch (e) { fail(e); }
   },
+  "lesson-request": () => lessonRequestForm(),
 
   /* ---- students -------------------------------------------------------- */
   "student-edit": el => { closeModal(); studentForm(el.dataset.id || null); },

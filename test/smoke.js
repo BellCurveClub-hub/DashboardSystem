@@ -71,6 +71,14 @@ function fixtures() {
     ],
     attendance: [{ id: "at1", session_id: "se3", student_id: "st1", status: "present", credits_charged: 1, marked_by: UID.admin, marked_at: new Date().toISOString() }],
     lesson_topic_grades: [],
+    lesson_requests: [
+      { id: "lr1", student_id: "st2", subject_id: "sub1", requested_date: plus(4), requested_time: "17:00",
+        note: "Prefers weekday afternoons", status: "pending", session_id: null, requested_by: UID.parent,
+        decided_by: null, decided_at: null, created_at: new Date().toISOString() },
+      { id: "lr2", student_id: "st1", subject_id: "sub2", requested_date: plus(5), requested_time: "10:00",
+        note: "", status: "pending", session_id: null, requested_by: UID.parent,
+        decided_by: null, decided_at: null, created_at: new Date().toISOString() },
+    ],
     packages: [{ id: "pk1", name: "8-lesson Maths package", lessons: 8, price_cents: 48000, subject_id: "sub1", is_active: true }],
     invoices: [
       { id: "in1", invoice_no: "INV-2026-1000", student_id: "st1", parent_id: UID.parent, package_id: "pk1",
@@ -281,6 +289,30 @@ async function runRole(roleName, userId, empty) {
     check("topic grade saved", DB.lesson_topic_grades.some(g => g.student_id === "st1" && g.topic_id === "tp1" && Number(g.score) === 82));
     check("lesson summary saved", (DB.sessions.find(s => s.id === "se1") || {}).lesson_summary === "Covered quadratic factoring.");
     check("inline homework created", DB.homework.some(h => h.title === "Practice set 3" && h.student_id === "st1"));
+
+    // --- custom lesson requests: accept & schedule, and decline ---
+    w.location.hash = "#/bookings"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    check("pending lesson requests show on Booking requests", w.document.querySelector("#view").textContent.includes("Prefers weekday afternoons"));
+    w.document.querySelector('[data-act="lesson-request-accept"][data-id="lr1"]').click();
+    await new Promise(r => setTimeout(r, 120));
+    const classSelect = w.document.querySelector('[name="class_id"]');
+    if (classSelect) classSelect.value = "cl1";
+    const tutorSelect = w.document.querySelector('[name="tutor_id"]');
+    if (tutorSelect) tutorSelect.value = UID.tutor;
+    w.document.querySelector('[data-act="modal-save"]').click();
+    await new Promise(r => setTimeout(r, 150));
+    const scheduledReq = DB.lesson_requests.find(r => r.id === "lr1");
+    check("accepted request marked scheduled", scheduledReq.status === "scheduled" && !!scheduledReq.session_id);
+    const newSess = DB.sessions.find(s => s.id === scheduledReq.session_id);
+    check("accepting created the actual session", !!newSess && newSess.class_id === "cl1" && newSess.tutor_id === UID.tutor);
+    check("accepting confirmed a booking for the student", DB.bookings.some(b => b.session_id === scheduledReq.session_id && b.student_id === "st2" && b.status === "confirmed"));
+
+    w.location.hash = "#/bookings"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    w.document.querySelector('[data-act="lesson-request-decline"][data-id="lr2"]').click();
+    await new Promise(r => setTimeout(r, 100));
+    w.document.querySelector('[data-act="modal-save"]').click();
+    await new Promise(r => setTimeout(r, 100));
+    check("declined request marked declined", DB.lesson_requests.find(r => r.id === "lr2").status === "declined");
 
     w.location.hash = "#/billing"; await w.eval("render()"); await new Promise(r => setTimeout(r, 60));
     await tryClick('[data-act="new-invoice"]');
