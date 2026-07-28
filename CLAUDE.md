@@ -250,6 +250,31 @@ trip per cell.
   tutor). No self-scheduling, no auto-assignment — this only ever changes
   what shows as green or red for a family to *propose*.
 
+**Booking for more than one child.** Browsing (which subjects/classes show
+up, the calendar's hour band) stays scoped to whichever child's tab is
+active — `studentTabs()`/`currentStudent()`, unchanged. But *booking* an
+item now works out, per item, which of the parent's children could
+actually take it, and lets the parent pick one or both:
+
+- Ad-hoc slots have no subject restriction (`request_booking()` never
+  checked one) — every child with a credit balance is offered.
+- Fixed-class drop-ins do need a match — level, a subject that child
+  already takes elsewhere, not already enrolled — checked per child via
+  `eligibleFor()`, since siblings can easily differ on all three.
+- A child who's already booked shows as a status pill instead of a
+  checkbox; a child with a pending makeup for that slot gets it labelled
+  and books via `redeem_makeup` instead of `request_booking` in the same
+  batch — one "Book selected" click can mix both kinds of RPC call, one
+  per selected child.
+- Checkboxes carry no `data-act` (same lesson as the topic-toggle
+  buttons — the global click handler's unconditional `preventDefault()`
+  would fight a real checkbox's native toggle). They're read only when
+  the "Book selected" button next to them is clicked, same pattern as
+  the attendance selects and topic-grade inputs already use.
+- With only one child, nothing changes — the original single button.
+- **Request a lesson** (the custom-proposal form) got the same "For"
+  checkbox list, since a proposal isn't gated by subject at all.
+
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a
 makeup isn't a new balance or ledger, just a record that notice was given.

@@ -61,6 +61,8 @@ function fixtures() {
         status: "scheduled", is_bookable: false, tutor_name: "Ms Ong", room: "R3", notes: null, tutor_id: "u-other" },
       { id: "se5", class_id: "cl4", session_date: plus(2), start_time: "18:00", end_time: "19:30", capacity: 4,
         status: "scheduled", is_bookable: false, tutor_name: "Mr Lim", room: "R1", notes: null },
+      { id: "se6", class_id: "cl2", session_date: plus(2), start_time: "13:00", end_time: "14:30", capacity: 4,
+        status: "scheduled", is_bookable: true, tutor_name: "Mr Lim", room: "R2", notes: "Fresh ad-hoc, nobody's booked it yet" },
     ],
     enrolments: [
       { id: "en1", student_id: "st1", class_id: "cl1", start_date: plus(-60), end_date: null, status: "active" },
@@ -245,6 +247,7 @@ function makeClient(DB, userId) {
     },
     from: query,
     rpc: async (fn, args) => {
+      (DB.__rpcCalls = DB.__rpcCalls || []).push({ fn, args });
       if (fn === "tutor_availability_grid") return { data: computeAvailabilityGrid(DB, args || {}), error: null };
       return { data: 4, error: null };
     },
@@ -476,6 +479,18 @@ async function runRole(roleName, userId, empty) {
         w.document.querySelector("#f_requested_time").value === "12:00");
       w.document.querySelector('[data-act="modal-close"]').click();
     }
+
+    // --- multi-child: book one open ad-hoc slot for just one of two kids ---
+    const kidBoxes = w.document.querySelectorAll('.kid-book-box[data-session="se6"]');
+    check("both children with credit show as checkboxes on a fresh ad-hoc slot (no subject gate)", kidBoxes.length === 2);
+    const st2Box = Array.from(kidBoxes).find(b => b.dataset.kid === "st2");
+    if (st2Box) st2Box.checked = false;
+    DB.__rpcCalls = [];
+    w.document.querySelector('[data-act="multi-book"][data-id="se6"]').click();
+    await new Promise(r => setTimeout(r, 100));
+    const bookingCalls = DB.__rpcCalls.filter(c => c.fn === "request_booking");
+    check("unchecking a child excludes them from the batch booking",
+      bookingCalls.length === 1 && bookingCalls[0].args.p_student === "st1");
 
     // --- progress: subject tabs for a student with more than one subject ---
     w.location.hash = "#/progress"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));

@@ -4294,13 +4294,15 @@ PARENT.schedule = async function (view) {
 async function bookableView(view) {
   if (!state.students.length) return noStudentYet(view);
   const s = currentStudent();
+  const kids = state.students;
+  const kidIds = kids.map(k => k.id);
   const wFrom = state.bookFrom, wTo = addDays(wFrom, 6);
-  const [adhocSessions, classes, mine, reports, myEnrols, allEnrols, myRequests, subjects] = await Promise.all([
+  const [adhocSessions, classes, allBookings, allReports, myEnrols, allEnrols, myRequests, subjects] = await Promise.all([
     sel("sessions", q => q.eq("is_bookable", true).eq("status", "scheduled")
       .gte("session_date", wFrom).lte("session_date", wTo).order("session_date").order("start_time")),
     sel("classes", q => q.eq("is_active", true)),
-    sel("bookings", q => q.eq("student_id", s.id).in("status", ["requested", "confirmed", "waitlisted"])),
-    sel("absence_reports", q => q.eq("student_id", s.id)),
+    sel("bookings", q => q.in("student_id", kidIds).in("status", ["requested", "confirmed", "waitlisted"])),
+    sel("absence_reports", q => q.in("student_id", kidIds)),
     sel("enrolments", q => q.eq("student_id", s.id).eq("status", "active")),
     sel("enrolments", q => q.eq("status", "active")),
     sel("lesson_requests", q => q.eq("student_id", s.id).order("created_at", { ascending: false }).limit(10)),
@@ -4309,7 +4311,9 @@ async function bookableView(view) {
   const cmap = byId(classes);
 
   // fixed classes with a spare seat, in a subject this student already takes,
-  // matching their level — a drop-in, not a permanent enrolment
+  // matching their level — a drop-in, not a permanent enrolment. Browsing
+  // stays scoped to whichever kid's tab is active; which siblings can also
+  // be booked into any one item is worked out per item below.
   const myClassIds = myEnrols.map(e => e.class_id);
   const mySubjects = new Set(myClassIds.map(id => (cmap[id] || {}).subject_id).filter(Boolean));
   const enrolledCount = {};
@@ -4327,9 +4331,26 @@ async function bookableView(view) {
   const seen = {};
   const sessions = adhocSessions.concat(openFixedSessions).filter(x => (seen[x.id] ? false : (seen[x.id] = true)));
 
-  const taken = {}; mine.forEach(b => (taken[b.session_id] = b));
+  // per-child booking status, absence-to-make-up, and (for the fixed-class
+  // drop-in case only) subject/level eligibility — ad-hoc slots have no
+  // subject restriction, so only credits gate those
+  const takenMap = {}; allBookings.forEach(b => (takenMap[b.student_id + "_" + b.session_id] = b));
+  const makeupByKid = {};
+  kids.forEach(k => {
+    const open = allReports.filter(r => r.student_id === k.id && !r.redeemed_booking_id);
+    makeupByKid[k.id] = open.sort((a, b) => a.reported_at.localeCompare(b.reported_at))[0] || null;
+  });
+  const kidEnrolSet = {}, kidSubjectSet = {};
+  kids.forEach(k => {
+    kidEnrolSet[k.id] = new Set(allEnrols.filter(e => e.student_id === k.id).map(e => e.class_id));
+    kidSubjectSet[k.id] = new Set([...kidEnrolSet[k.id]].map(cid => (cmap[cid] || {}).subject_id).filter(Boolean));
+  });
+  const eligibleFor = (x, c, isOpenClass) => kids.filter(k =>
+    Number(k.credits) > 0 &&
+    (!isOpenClass || (c.level === k.level && kidSubjectSet[k.id].has(c.subject_id) && !kidEnrolSet[k.id].has(c.id))));
+
   const noCredits = Number(s.credits) <= 0;
-  const makeup = reports.filter(r => !r.redeemed_booking_id).sort((a, b) => a.reported_at.localeCompare(b.reported_at))[0] || null;
+  const makeup = makeupByKid[s.id];
   const makeupSession = makeup ? (await sel("sessions", q => q.eq("id", makeup.session_id)))[0] : null;
   const makeupDate = makeupSession ? fmtDate(makeupSession.session_date) : "";
 
@@ -4363,21 +4384,38 @@ async function bookableView(view) {
     const x = sessByCell[key];
     if (x) {
       const c = cmap[x.class_id] || {};
-      const b = taken[x.id];
       const isOpenClass = seatsLeft[x.class_id] !== undefined;
-      let action = '<button class="btn btn-sm btn-mint" data-act="request-booking" data-id="' + x.id + '"' +
-        (noCredits ? " disabled" : "") + ">Request</button>";
-      if (!b && makeup) {
-        action = '<button class="btn btn-sm btn-mint" data-act="redeem-makeup" data-session="' + x.id + '" data-report="' + makeup.id + '"' +
-          (noCredits ? " disabled" : "") + ">Makes up " + esc(makeupDate) + "</button>";
+      let body;
+      if (kids.length < 2) {
+        const b = takenMap[s.id + "_" + x.id];
+        let action = '<button class="btn btn-sm btn-mint" data-act="request-booking" data-id="' + x.id + '"' +
+          (noCredits ? " disabled" : "") + ">Request</button>";
+        if (!b && makeup) {
+          action = '<button class="btn btn-sm btn-mint" data-act="redeem-makeup" data-session="' + x.id + '" data-report="' + makeup.id + '"' +
+            (noCredits ? " disabled" : "") + ">Makes up " + esc(makeupDate) + "</button>";
+        }
+        body = b ? '<span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span>" : action;
+      } else {
+        const eligible = eligibleFor(x, c, isOpenClass);
+        const kidRows = eligible.map(k => {
+          const b = takenMap[k.id + "_" + x.id];
+          if (b) return '<div><span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' +
+            esc(k.full_name) + " · " + esc(b.status) + "</span></div>";
+          const km = makeupByKid[k.id];
+          return '<label class="check" style="display:block;font-size:12px">' +
+            '<input type="checkbox" class="kid-book-box" data-session="' + x.id + '" data-kid="' + k.id +
+            '" data-report="' + (km ? km.id : "") + '" checked> ' + esc(k.full_name) +
+            (km ? " (makes up a missed lesson)" : "") + "</label>";
+        }).join("");
+        const anyPickable = eligible.some(k => !takenMap[k.id + "_" + x.id]);
+        body = kidRows + (anyPickable
+          ? '<button class="btn btn-sm btn-mint" style="margin-top:4px" data-act="multi-book" data-id="' + x.id + '">Book selected</button>' : "");
       }
       return '<div class="sess' + (isOpenClass ? " adhoc" : "") + '">' +
         '<div class="t">' + esc(fmtRange(x.start_time, x.end_time)) + "</div>" +
         '<div class="n">' + esc(c.name || "Class") + "</div>" +
         (isOpenClass ? '<div class="m">' + seatsLeft[x.class_id] + " seat" + (seatsLeft[x.class_id] === 1 ? "" : "s") + " left</div>" : "") +
-        '<div style="margin-top:5px">' + (b
-          ? '<span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span>"
-          : action) + "</div></div>";
+        '<div style="margin-top:5px">' + body + "</div></div>";
     }
     const free = freeMap[key];
     if (free === undefined) return "";
@@ -4428,24 +4466,35 @@ STUDENT.book = bookableView;
 
 async function lessonRequestForm(presetDate, presetHour) {
   const s = currentStudent();
+  const multi = state.students.length > 1;
   const subjects = await sel("subjects", q => q.order("name"));
   openModal({
-    title: "Request a lesson for " + s.full_name,
+    title: multi ? "Request a lesson" : "Request a lesson for " + s.full_name,
     body:
       fSelect("subject_id", "Subject", "", subjects.map(x => ({ value: x.id, label: x.name })), { blank: "— choose —" }) +
       '<div class="grid-2">' +
         fText("requested_date", "Preferred date", presetDate || addDays(today(), 3), { type: "date" }) +
         fText("requested_time", "Preferred time", presetHour !== undefined ? String(presetHour).padStart(2, "0") + ":00" : "16:00", { type: "time" }) +
       "</div>" +
+      (multi
+        ? '<div class="field"><label>For</label>' +
+          state.students.map(k => '<label class="check" style="display:block"><input type="checkbox" class="req-kid-box" data-kid="' +
+            k.id + '"' + (k.id === s.id ? " checked" : "") + "> " + esc(k.full_name) + "</label>").join("") +
+          "</div>"
+        : "") +
       fArea("note", "Anything the centre should know", ""),
     onSave: async () => {
       const v = modalValues();
       if (!v.subject_id) return toast("Choose a subject.", "bad");
+      const forKids = multi ? $$(".req-kid-box:checked").map(el => el.dataset.kid) : [s.id];
+      if (!forKids.length) return toast("Pick at least one student.", "bad");
       try {
-        await ins("lesson_requests", {
-          student_id: s.id, subject_id: v.subject_id, requested_date: v.requested_date,
-          requested_time: v.requested_time, note: v.note, requested_by: state.user.id,
-        });
+        for (const kid of forKids) {
+          await ins("lesson_requests", {
+            student_id: kid, subject_id: v.subject_id, requested_date: v.requested_date,
+            requested_time: v.requested_time, note: v.note, requested_by: state.user.id,
+          });
+        }
         closeModal(); toast("Request sent — the centre will confirm a time.", "ok"); render();
       } catch (e) { fail(e); }
     },
@@ -5586,6 +5635,22 @@ const ACTIONS = {
       if (error) throw error;
       toast(data === "confirmed" ? "Booked." : data === "waitlisted" ? "Added to the waitlist." : "Request sent.", "ok");
       render();
+    } catch (e) { fail(e); }
+  },
+  "multi-book": async el => {
+    const boxes = $$('.kid-book-box[data-session="' + el.dataset.id + '"]:checked');
+    if (!boxes.length) return toast("Pick at least one student.", "bad");
+    try {
+      for (const box of boxes) {
+        if (box.dataset.report) {
+          const { error } = await db.rpc("redeem_makeup", { p_report: box.dataset.report, p_session: el.dataset.id });
+          if (error) throw error;
+        } else {
+          const { error } = await db.rpc("request_booking", { p_session: el.dataset.id, p_student: box.dataset.kid });
+          if (error) throw error;
+        }
+      }
+      toast("Booked.", "ok"); render();
     } catch (e) { fail(e); }
   },
   "cancel-booking": async el => {
