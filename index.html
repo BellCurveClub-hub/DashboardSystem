@@ -130,7 +130,8 @@ button,input,select,textarea{font:inherit;color:inherit}
 .input,input[type=text],input[type=email],input[type=password],input[type=number],
 input[type=date],input[type=time],input[type=tel],select,textarea{
   width:100%; padding:9px 11px; border:1px solid #D8D2C4; border-radius:var(--r-sm);
-  background:var(--paper); font-size:14.5px; transition:border-color .12s, box-shadow .12s;
+  background:var(--paper); font-size:16px; transition:border-color .12s, box-shadow .12s;
+  /* 16px, not 14.5 — anything smaller makes iOS Safari zoom in on focus */
 }
 textarea{min-height:82px; resize:vertical}
 .input:focus,input:focus,select:focus,textarea:focus{
@@ -220,6 +221,7 @@ input[disabled],select[disabled],textarea[disabled]{background:var(--cream-2); c
   .burger{display:block}
   .view{padding:16px 14px 60px}
   .topbar{padding:12px 14px}
+  .nav-item{padding:12px 11px; font-size:15px}
 }
 .scrim{position:fixed; inset:0; background:rgba(7,26,44,.5); z-index:50}
 
@@ -332,6 +334,15 @@ table.tbl tr[draggable="true"]:active .drag-handle{cursor:grabbing}
 .slot-chip.free{background:var(--mint-100); color:var(--mint-600); cursor:pointer; transition:background .12s}
 .slot-chip.free:hover{background:#BFEAE4}
 .slot-chip.busy{background:#FBEAE7; color:#B23A2A; opacity:.7; cursor:not-allowed}
+@media (max-width:640px){
+  /* still 7 columns (swapping to a single-day view loses the at-a-glance
+     week shape), but narrower ones so a phone shows ~3 days before the
+     week-grid's own horizontal scroll (it sits in a .tbl-wrap) takes over */
+  .week-grid{grid-template-columns:repeat(7,minmax(104px,1fr))}
+  .sess{margin:5px 5px 0; padding:6px 7px}
+  .sess .n{font-size:12.5px}
+  .slot-chip{margin:4px 5px 0; padding:5px 6px; font-size:11px}
+}
 
 /* ============================================================
    PROGRESS / MASTERY
@@ -375,8 +386,16 @@ table.tbl tr[draggable="true"]:active .drag-handle{cursor:grabbing}
 .modal-head .spacer{flex:1}
 .modal-body{padding:20px; overflow-y:auto}
 .modal-foot{padding:14px 20px; border-top:1px solid var(--line); display:flex; gap:9px; justify-content:flex-end; background:var(--cream); border-radius:0 0 var(--r-lg) var(--r-lg)}
-.x-btn{border:0; background:transparent; font-size:21px; line-height:1; cursor:pointer; color:var(--ink-faint); padding:2px 6px}
+.x-btn{border:0; background:transparent; font-size:21px; line-height:1; cursor:pointer; color:var(--ink-faint); padding:8px 10px; margin:-8px -10px}
 .x-btn:hover{color:var(--ink)}
+@media (max-width:480px){
+  .modal-scrim{padding:0; place-items:stretch}
+  .modal{max-width:none; max-height:none; height:100%; border-radius:0; margin:0}
+  .modal.wide{max-width:none}
+  .modal-head{padding:14px 16px}
+  .modal-body{padding:16px}
+  .modal-foot{padding:12px 16px; flex-wrap:wrap}
+}
 
 /* ============================================================
    TOASTS
@@ -415,9 +434,21 @@ table.tbl tr[draggable="true"]:active .drag-handle{cursor:grabbing}
    Rendered into #printdoc and shown on its own for printing.
    ============================================================ */
 #printdoc{display:none}
+.doc-bar{
+  position:sticky; top:0; background:var(--ink-800); padding:11px 16px;
+  display:flex; gap:9px; align-items:center; flex-wrap:wrap; z-index:5;
+}
+.doc-bar strong{color:#fff; flex:1; min-width:120px; font-family:var(--display)}
 .doc{
   background:var(--paper); color:var(--ink); width:100%; max-width:760px; margin:0 auto;
   padding:34px 38px; font-size:13.5px; line-height:1.55;
+}
+@media (max-width:480px){
+  .doc{padding:20px 16px}
+  .doc-top{flex-wrap:wrap; row-gap:12px}
+  .doc-meta{text-align:left}
+  .doc-parties{grid-template-columns:1fr; gap:16px}
+  .doc .totals{width:100%; max-width:290px}
 }
 .doc-top{display:flex; gap:20px; align-items:flex-start; border-bottom:2px solid var(--ink-800); padding-bottom:16px}
 .doc-top .spacer{flex:1}
@@ -4985,8 +5016,8 @@ async function showInvoiceDoc(invoiceId) {
   const perLesson = inv.lessons > 0 ? Math.round(inv.amount_cents / inv.lessons) : inv.amount_cents;
 
   $("#printdoc").innerHTML =
-    '<div class="no-print" style="position:sticky;top:0;background:var(--ink-800);padding:11px 16px;display:flex;gap:9px;align-items:center;z-index:5">' +
-      '<strong style="color:#fff;flex:1;font-family:var(--display)">' + esc(paid ? "Receipt" : "Invoice") + " " + esc(inv.invoice_no) + "</strong>" +
+    '<div class="no-print doc-bar">' +
+      '<strong>' + esc(paid ? "Receipt" : "Invoice") + " " + esc(inv.invoice_no) + "</strong>" +
       '<button class="btn btn-hl btn-sm" data-act="do-print">Print or save as PDF</button>' +
       '<button class="btn btn-sm" data-act="close-print">Close</button>' +
     "</div>" +

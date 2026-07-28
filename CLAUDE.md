@@ -348,6 +348,34 @@ prompted this.
 - Subjects gained an edit button (`subjectForm` now takes an optional
   id) — it only ever supported adding before.
 
+**Mobile pass.** The shell already had the groundwork (viewport meta,
+an off-canvas sidebar drawer below 900px, `.grid-2`/`.grid-3` collapsing
+to one column below 640px, tables scrolling horizontally in `.tbl-wrap`
+rather than breaking layout). What was missing:
+
+- Form inputs were 14.5px — under the 16px iOS Safari uses as the
+  cutoff for auto-zooming a focused field. Every `input`/`select`/
+  `textarea` is 16px now. Confirmed live with Playwright at a
+  390×844 viewport: zero horizontal overflow, computed font-size 16px.
+- The Book a slot week-grid keeps its 7-column shape even on a phone
+  (collapsing to a single day loses the at-a-glance week, and it
+  already sits in a horizontally-scrolling `.tbl-wrap`) but the minimum
+  column width and card padding shrink below 640px so more of the week
+  is visible before that scroll kicks in.
+- A modal goes edge-to-edge (no radius, no margin, full height) below
+  480px instead of floating a small card in a padded scrim — more
+  usable width on a small phone. The close button's tap target grew
+  (padding increased, offset with a matching negative margin so the
+  visual size is unchanged).
+- The invoice/receipt document (`showInvoiceDoc` — parents view this
+  on-screen, not just at print time) had a fixed-width totals block and
+  a two-column parties grid that could run tight or overflow under
+  ~375px; both collapse below 480px. Its toolbar was inline-styled with
+  no wrap behaviour, which could overflow on a narrow phone — pulled
+  into a `.doc-bar` class with `flex-wrap` instead.
+- Sidebar nav items get slightly taller padding while in mobile-drawer
+  mode, for a better touch target.
+
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a
 makeup isn't a new balance or ledger, just a record that notice was given.
