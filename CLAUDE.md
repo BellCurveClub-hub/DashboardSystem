@@ -152,9 +152,12 @@ invoices, manual payment recording, printable invoice/receipt · reward shelf
 and redemption queue · homework assign/submit/grade · topic proficiency
 scoring · test results (centre and school) with grading scales, approval
 queue and report-slip storage · CSV exports · settings · makeup lessons for
-absences (see below) · an Accounts admin page for changing anyone's role ·
-admins can also be a class's tutor and get the matching "My teaching" views ·
-tutor self sign-up gated behind admin approval (see below).
+absences (see below) · an Accounts admin page for changing anyone's role,
+plus a focused Tutors page for approvals and who's teaching what · admins
+can also be a class's tutor and get the matching "My teaching" views ·
+tutor self sign-up gated behind admin approval (see below) · self-service
+change email, change password and (pending SMS provider setup) phone
+verification in My account.
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a

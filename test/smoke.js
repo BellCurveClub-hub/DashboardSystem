@@ -178,6 +178,8 @@ function makeClient(DB, userId) {
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
       signOut: async () => ({}),
       resetPasswordForEmail: async () => ({}),
+      updateUser: async () => ({ error: null }),
+      verifyOtp: async () => ({ error: null }),
     },
     from: query,
     rpc: async () => ({ data: 4, error: null }),

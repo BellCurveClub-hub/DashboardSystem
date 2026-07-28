@@ -1277,6 +1277,35 @@ begin
   return new;
 end $$;
 
+-- ===========================================================================
+-- PART 4 — Self-service email and phone changes
+-- Added after the first release. Safe to run on an existing database.
+--
+-- Changing email or phone through Supabase Auth (updateUser) only takes
+-- effect once confirmed -- a link for email, a texted code for phone -- so
+-- profiles is never written to directly from the client for either. This
+-- trigger is the only thing that ever updates profiles.email/phone/
+-- phone_verified, firing after auth.users actually changes.
+-- ===========================================================================
+alter table profiles add column if not exists phone_verified boolean not null default false;
+
+create or replace function fn_user_contact_sync() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  update profiles
+     set email = coalesce(new.email, email),
+         phone = coalesce(new.phone, phone),
+         phone_verified = (new.phone_confirmed_at is not null)
+   where id = new.id
+     and (new.email is distinct from old.email
+          or new.phone is distinct from old.phone
+          or new.phone_confirmed_at is distinct from old.phone_confirmed_at);
+  return new;
+end $$;
+drop trigger if exists trg_user_contact_sync on auth.users;
+create trigger trg_user_contact_sync after update on auth.users
+for each row execute function fn_user_contact_sync();
+
 alter table classes  add column if not exists tutor_id uuid references profiles(id) on delete set null;
 alter table sessions add column if not exists tutor_id uuid references profiles(id) on delete set null;
 
@@ -1927,6 +1956,7 @@ const state = {
   cache: {},
   counts: {},
   settings: {},
+  phoneCodeSent: false,
 };
 
 /* ---------------------------------------------------------------- helpers -- */
@@ -2200,7 +2230,8 @@ const NAV = {
     { r: "mystudents",   t: "My students",   i: "☺" },
     { g: "People" },
     { r: "students",   t: "Students",     i: "☺" },
-    { r: "accounts",   t: "Accounts",     i: "⚿", count: "pendingTutors" },
+    { r: "tutors",     t: "Tutors",       i: "◔", count: "pendingTutors" },
+    { r: "accounts",   t: "Accounts",     i: "⚿" },
     { r: "classes",    t: "Classes",      i: "▤" },
     { g: "Money" },
     { r: "billing",    t: "Invoices",     i: "$" },
@@ -2343,6 +2374,7 @@ function renderAuth() {
             fText("email", "Email", "", { type: "email" }) +
             fText("phone", "Mobile", "", { type: "tel", placeholder: "9123 4567" }) +
             fText("password", "Password", "", { type: "password", hint: "At least 6 characters." }) +
+            fText("password2", "Confirm password", "", { type: "password" }) +
             fSelect("role", "This account is for", "parent", [
               { value: "parent", label: "A parent" },
               { value: "student", label: "A student" },
@@ -2906,6 +2938,44 @@ ADMIN.accounts = async function (view) {
     '<div class="note">New accounts sign up as a parent, a student, or a tutor awaiting approval. Change the role below to make one a real tutor or an admin — they see the matching menu next time they sign in.</div>' +
     card("", profiles.length ? table(["Account", "Email", "Phone", "Role", ""], rows)
       : emptyState("⚿", term ? "Nobody matches that" : "No accounts yet", ""), "", true);
+};
+
+/* A focused roster of just the tutors — who's approved, who's still waiting,
+   and what they're actually assigned to teach. Accounts still has every role
+   and the full role-picker; this reuses the same acct-save-role action so
+   approving/demoting works identically from either page. */
+ADMIN.tutors = async function (view) {
+  const all = await sel("profiles", q => q.in("role", ["tutor", "pending_tutor"]).order("full_name"));
+  const classes = await sel("classes", q => q.eq("is_active", true).order("name"));
+  const byTutor = {};
+  classes.forEach(c => { if (c.tutor_id) (byTutor[c.tutor_id] = byTutor[c.tutor_id] || []).push(c.name); });
+  const pending = all.filter(p => p.role === "pending_tutor").length;
+
+  const rows = all.map(p => {
+    const isPending = p.role === "pending_tutor";
+    const opts = isPending ? [{ value: "pending_tutor", label: "Pending tutor approval" }].concat(ROLE_OPTS) : ROLE_OPTS;
+    const taught = byTutor[p.id] || [];
+    return "<tr><td><b>" + esc(p.full_name || "—") + "</b>" +
+      (isPending ? ' <span class="pill hl">awaiting approval</span>' : "") + "</td>" +
+      "<td>" + esc(p.email || "—") + "</td>" +
+      "<td>" + esc(p.phone || "—") + "</td>" +
+      "<td>" + (taught.length ? esc(taught.join(", ")) : "<span class='hint'>not teaching yet</span>") + "</td>" +
+      '<td><select name="acct_role_' + p.id + '">' +
+        opts.map(r => '<option value="' + r.value + '"' + (p.role === r.value ? " selected" : "") +
+          (r.value === "pending_tutor" ? " disabled" : "") + ">" + r.label + "</option>").join("") +
+      "</select></td>" +
+      '<td class="act"><button class="btn btn-sm btn-mint" data-act="acct-save-role" data-id="' + p.id + '">' +
+        (isPending ? "Approve" : "Save") + "</button></td></tr>";
+  });
+
+  view.innerHTML =
+    pageHead("Tutors", all.length + " tutor account" + (all.length === 1 ? "" : "s"),
+      '<button class="btn btn-ghost" data-act="nav" data-route="accounts">All accounts</button>') +
+    (pending ? '<div class="note hl">' + pending + " tutor sign-up" + (pending > 1 ? "s are" : " is") +
+      " waiting for approval. They can't see any student, schedule or homework data until approved.</div>" : "") +
+    card("", all.length ? table(["Tutor", "Email", "Phone", "Teaching", "Role", ""], rows)
+      : emptyState("◔", "No tutors yet",
+          "They appear here once someone signs up as a tutor, or you promote an account from Accounts."), "", true);
 };
 
 async function studentForm(id) {
@@ -3919,15 +3989,32 @@ PARENT.progress = async function (view) {
 /* --------------------------------------------------------- PARENT: account -- */
 async function accountView(view) {
   const p = state.profile;
+  const phoneLine = p.phone ? p.phone + (p.phone_verified ? " · verified" : " · not verified") : "Not set";
   view.innerHTML =
     pageHead("My account", "") +
     card("Your details",
       fText("acc_full_name", "Full name", p.full_name) +
-      fText("acc_phone", "Mobile", p.phone) +
-      fText("acc_email", "Email", p.email || state.user.email, { readonly: true, hint: "Contact the centre to change the email on the account." }) +
       '<button class="btn btn-primary" data-act="save-account">Save changes</button>') +
+    card("Email",
+      fText("acc_cur_email", "Current email", p.email || state.user.email, { readonly: true }) +
+      fText("acc_new_email", "New email", "", { type: "email",
+        hint: "We'll email a confirmation link to the new address before it takes effect." }) +
+      '<button class="btn btn-ghost" data-act="change-email">Send confirmation</button>') +
+    card("Mobile",
+      fText("acc_cur_phone", "Current mobile", phoneLine, { readonly: true }) +
+      fText("acc_new_phone", "New mobile", "", { type: "tel", placeholder: "+65 9123 4567",
+        hint: "Include the country code. We'll text a 6-digit code to confirm it." }) +
+      '<button class="btn btn-ghost" data-act="send-phone-code">Send code</button>' +
+      (state.phoneCodeSent
+        ? fText("acc_phone_code", "6-digit code", "", { placeholder: "123456" }) +
+          '<button class="btn btn-primary" data-act="confirm-phone-code">Confirm code</button>'
+        : "")) +
     card("Password",
-      "<p>We will email you a link to set a new password.</p>" +
+      fText("acc_new_pw", "New password", "", { type: "password", hint: "At least 6 characters." }) +
+      fText("acc_new_pw2", "Confirm new password", "", { type: "password" }) +
+      '<button class="btn btn-primary" data-act="change-password">Change password</button>' +
+      "<div class='divider'></div>" +
+      "<p>Or we can email you a reset link instead.</p>" +
       '<button class="btn btn-ghost" data-act="do-reset">Send a reset link</button>') +
     (state.students.length ? card("Linked students",
       table(["Student", "Level", { t: "Credits", num: true }, { t: "Points", num: true }],
@@ -4782,8 +4869,9 @@ const ACTIONS = {
   },
   "do-signup": async () => {
     const v = { name: $("#f_full_name").value.trim(), email: $("#f_email").value.trim(),
-                phone: $("#f_phone").value.trim(), pw: $("#f_password").value, role: $("#f_role").value };
+                phone: $("#f_phone").value.trim(), pw: $("#f_password").value, pw2: $("#f_password2").value, role: $("#f_role").value };
     if (!v.name || !v.email || v.pw.length < 6) return toast("Name, email and a password of at least 6 characters.", "bad");
+    if (v.pw !== v.pw2) return toast("Passwords don't match.", "bad");
     try {
       await signUp(v.email, v.pw, v.name, v.phone, v.role);
       toast("Account created. Check your email if confirmation is switched on.", "ok");
@@ -5060,8 +5148,50 @@ const ACTIONS = {
   },
   "save-account": async () => {
     try {
-      await upd("profiles", state.user.id, { full_name: $("#f_acc_full_name").value, phone: $("#f_acc_phone").value });
+      await upd("profiles", state.user.id, { full_name: $("#f_acc_full_name").value });
       await loadMe(); toast("Saved.", "ok"); render();
+    } catch (e) { fail(e); }
+  },
+  "change-email": async () => {
+    const email = ($("#f_acc_new_email") || {}).value.trim();
+    if (!email) return toast("Enter a new email first.", "bad");
+    try {
+      const { error } = await db.auth.updateUser({ email });
+      if (error) throw error;
+      toast("Confirmation link sent to " + email + " — click it to finish the change.", "ok");
+    } catch (e) { fail(e); }
+  },
+  "change-password": async () => {
+    const pw = ($("#f_acc_new_pw") || {}).value;
+    const pw2 = ($("#f_acc_new_pw2") || {}).value;
+    if (pw.length < 6) return toast("At least 6 characters.", "bad");
+    if (pw !== pw2) return toast("Passwords don't match.", "bad");
+    try {
+      const { error } = await db.auth.updateUser({ password: pw });
+      if (error) throw error;
+      toast("Password changed.", "ok"); render();
+    } catch (e) { fail(e); }
+  },
+  "send-phone-code": async () => {
+    const phone = ($("#f_acc_new_phone") || {}).value.trim();
+    if (!phone) return toast("Enter a mobile number first.", "bad");
+    try {
+      const { error } = await db.auth.updateUser({ phone });
+      if (error) throw error;
+      state.phoneCodeSent = true;
+      toast("Code sent to " + phone + ".", "ok"); render();
+    } catch (e) { fail(e); }
+  },
+  "confirm-phone-code": async () => {
+    const phone = ($("#f_acc_new_phone") || {}).value.trim();
+    const token = ($("#f_acc_phone_code") || {}).value.trim();
+    if (!token) return toast("Enter the code from the text message.", "bad");
+    try {
+      const { error } = await db.auth.verifyOtp({ phone, token, type: "phone_change" });
+      if (error) throw error;
+      state.phoneCodeSent = false;
+      toast("Mobile number verified.", "ok");
+      await loadMe(); render();
     } catch (e) { fail(e); }
   },
 
