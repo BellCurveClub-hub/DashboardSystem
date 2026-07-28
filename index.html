@@ -2159,6 +2159,11 @@ const NAV = {
     { r: "schedule",   t: "Schedule",     i: "▦" },
     { r: "bookings",   t: "Booking requests", i: "✎", count: "bookings" },
     { r: "attendance", t: "Attendance",   i: "✓" },
+    { g: "My teaching" },
+    { r: "teaching",     t: "Today (mine)",  i: "◱" },
+    { r: "myschedule",   t: "My schedule",   i: "▦" },
+    { r: "myattendance", t: "My attendance", i: "✓" },
+    { r: "mystudents",   t: "My students",   i: "☺" },
     { g: "People" },
     { r: "students",   t: "Students",     i: "☺" },
     { r: "classes",    t: "Classes",      i: "▤" },
@@ -4606,6 +4611,33 @@ TUTOR.assessments = async function (view) {
 
 TUTOR.homework = ADMIN.homework;
 TUTOR.account = accountView;
+
+/* ---------------------------------------------------------------------------
+   An admin who also personally teaches gets the same "what's mine" views a
+   tutor gets, alongside the full centre-wide admin ones. overview/schedule/
+   attendance scope purely by tutor_id === my id (myClassIds/mine), which
+   works for any role, so they're reused as-is. students, though, is scoped
+   by the database's is_tutor()-only RLS policy, so admin needs its own copy.
+   --------------------------------------------------------------------------- */
+ADMIN.teaching     = TUTOR.overview;
+ADMIN.myschedule   = TUTOR.schedule;
+ADMIN.myattendance = TUTOR.attendance;
+
+ADMIN.mystudents = async function (view) {
+  const { ids: classIds } = await myClassIds();
+  const enrols = classIds.length ? await sel("enrolments", q => q.in("class_id", classIds).eq("status", "active")) : [];
+  const studentIds = [...new Set(enrols.map(e => e.student_id))];
+  const students = studentIds.length ? await sel("students", q => q.in("id", studentIds).order("full_name")) : [];
+  view.innerHTML =
+    pageHead("My students", students.length + " in your classes") +
+    card("", students.length
+      ? table(["Student", "Level", "School", { t: "Credits", num: true }, ""], students.map(s =>
+          "<tr><td><b>" + esc(s.full_name) + "</b></td><td>" + esc(s.level || "—") + "</td>" +
+          "<td>" + esc(s.school || "—") + "</td>" +
+          '<td class="num">' + s.credits + "</td>" +
+          '<td class="act"><button class="btn btn-sm btn-ghost" data-act="tutor-student" data-id="' + s.id + '">Progress</button></td></tr>'))
+      : emptyState("☺", "No students yet", "They appear once you are set as the tutor on a class with enrolments."), "", true);
+};
 
 /* ============================================================================
    EVENTS — one delegated handler for the whole page
