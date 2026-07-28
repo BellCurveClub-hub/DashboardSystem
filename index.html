@@ -763,7 +763,10 @@ for each row execute function fn_new_user();
 create or replace function fn_profile_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  if not is_admin() then
+  -- only guard signed-in app sessions; direct database access (SQL editor,
+  -- table editor, service role) is already fully privileged, and this is
+  -- how the very first admin gets promoted
+  if auth.uid() is not null and not is_admin() then
     new.role := old.role;
     new.is_active := old.is_active;
   end if;
