@@ -210,3 +210,10 @@ student, but a tutor sign-up never lands as `tutor` directly.
   is deployed; parents see PayNow instructions instead.
 - **Email sending.** Notifications are to be stored and shown in-app first;
   the sender follows the same deferred-function pattern.
+- **Twilio Trust Hub / Business Profile (SMS phone verification).** The app
+  code and schema for phone verification are already built and live (My
+  account → Mobile → send code/confirm code, `phone_verified` on
+  `profiles`). It does nothing yet because no SMS provider is configured in
+  Supabase — that needs Twilio's Business Profile/KYC approval (Trust Hub)
+  for their compliant Singapore route, which the centre isn't paying to set
+  up right now. Do not chase this further until asked.
