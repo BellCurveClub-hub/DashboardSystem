@@ -590,6 +590,20 @@ create table if not exists attendance (
   unique (session_id, student_id)
 );
 
+-- a family flagging, ahead of time, that a student will miss a fixed weekly
+-- session — the notice-window check lives in report_absence(), not here
+create table if not exists absence_reports (
+  id                   uuid primary key default gen_random_uuid(),
+  session_id           uuid not null references sessions(id) on delete cascade,
+  student_id           uuid not null references students(id) on delete cascade,
+  reported_by          uuid references profiles(id) on delete set null,
+  reported_at          timestamptz not null default now(),
+  redeemed_booking_id  uuid references bookings(id) on delete set null,
+  created_at           timestamptz not null default now(),
+  unique (session_id, student_id)
+);
+create index if not exists absence_reports_student_idx on absence_reports(student_id);
+
 create table if not exists packages (
   id            uuid primary key default gen_random_uuid(),
   name          text not null,
@@ -1021,6 +1035,62 @@ begin
   update bookings set status = 'cancelled' where id = p_booking;
 end $$;
 
+-- a family flags, ahead of time, that a student will miss a fixed weekly
+-- session — fixed classes have no booking to cancel, so this is the only
+-- record that notice was given
+create or replace function report_absence(p_session uuid, p_student uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_sess sessions; v_class classes; v_hours int;
+begin
+  if not (is_admin() or p_student in (select my_student_ids())) then
+    raise exception 'That is not your student.';
+  end if;
+  select * into v_sess from sessions where id = p_session;
+  if v_sess is null then raise exception 'That lesson no longer exists.'; end if;
+  if v_sess.status <> 'scheduled' then raise exception 'That lesson has been cancelled.'; end if;
+
+  select * into v_class from classes where id = v_sess.class_id;
+  if v_class.kind <> 'fixed' then
+    raise exception 'This is a bookable slot — cancel the booking instead.';
+  end if;
+  if not exists (select 1 from enrolments where student_id = p_student and class_id = v_sess.class_id and status = 'active') then
+    raise exception 'Not enrolled in this class.';
+  end if;
+
+  v_hours := setting_int('cancel_hours', 24);
+  if not is_admin() and (v_sess.session_date + v_sess.start_time) < now() + (v_hours || ' hours')::interval then
+    raise exception 'Too late to report online — please call the centre.';
+  end if;
+
+  insert into absence_reports (session_id, student_id, reported_by)
+  values (p_session, p_student, auth.uid())
+  on conflict (session_id, student_id) do nothing;
+end $$;
+
+-- redeem a reported absence for a seat in an open bookable slot — this is
+-- request_booking() plus the link back to the report, so the family and the
+-- centre can both see it was made up
+create or replace function redeem_makeup(p_report uuid, p_session uuid) returns text
+language plpgsql security definer set search_path = public as $$
+declare v_rep absence_reports; v_status text; v_booking uuid;
+begin
+  select * into v_rep from absence_reports where id = p_report;
+  if v_rep is null then raise exception 'Absence report not found.'; end if;
+  if not (is_admin() or v_rep.student_id in (select my_student_ids())) then
+    raise exception 'That is not your absence report.';
+  end if;
+  if v_rep.redeemed_booking_id is not null then
+    raise exception 'This makeup has already been used.';
+  end if;
+
+  v_status := request_booking(p_session, v_rep.student_id);
+
+  select id into v_booking from bookings where session_id = p_session and student_id = v_rep.student_id;
+  update absence_reports set redeemed_booking_id = v_booking where id = p_report;
+
+  return v_status;
+end $$;
+
 create or replace function submit_homework(p_id uuid) returns void
 language plpgsql security definer set search_path = public as $$
 begin
@@ -1062,6 +1132,7 @@ alter table sessions      enable row level security;
 alter table enrolments    enable row level security;
 alter table bookings      enable row level security;
 alter table attendance    enable row level security;
+alter table absence_reports enable row level security;
 alter table packages      enable row level security;
 alter table invoices      enable row level security;
 alter table credit_ledger enable row level security;
@@ -1077,7 +1148,7 @@ declare t text;
 begin
   -- wipe any previous version of these policies so the script re-runs cleanly
   for t in select unnest(array['profiles','students','subjects','topics','classes','sessions','enrolments',
-                              'bookings','attendance','packages','invoices','credit_ledger','points_ledger',
+                              'bookings','attendance','absence_reports','packages','invoices','credit_ledger','points_ledger',
                               'rewards','redemptions','homework','topic_mastery','settings']) loop
     execute format('drop policy if exists p_read  on %I', t);
     execute format('drop policy if exists p_write on %I', t);
@@ -1127,6 +1198,11 @@ create policy p_write on topic_mastery for all using (is_admin()) with check (is
 -- which enforce capacity, credit balance and the cancellation window
 create policy p_read  on bookings for select using (is_admin() or student_id in (select my_student_ids()));
 create policy p_write on bookings for all using (is_admin()) with check (is_admin());
+
+-- absence_reports: families read their own and act through report_absence() /
+-- redeem_makeup(), which enforce the notice window and enrolment
+create policy p_read  on absence_reports for select using (is_admin() or student_id in (select my_student_ids()));
+create policy p_write on absence_reports for all using (is_admin()) with check (is_admin());
 
 -- invoices: families read only; only admin and the payment webhook may change them
 create policy p_read  on invoices for select using (is_admin() or parent_id = auth.uid() or student_id in (select my_student_ids()));
@@ -1478,10 +1554,12 @@ drop policy if exists p_tutor on homework;
 drop policy if exists p_tutor on enrolments;
 drop policy if exists p_tutor on topic_mastery;
 drop policy if exists p_tutor on profiles;
+drop policy if exists p_tutor on absence_reports;
 
 create policy p_tutor on students   for select using (is_tutor() and id in (select my_taught_student_ids()));
 create policy p_tutor on enrolments for select using (is_tutor() and student_id in (select my_taught_student_ids()));
 create policy p_tutor on topic_mastery for select using (is_tutor() and student_id in (select my_taught_student_ids()));
+create policy p_tutor on absence_reports for select using (is_tutor() and student_id in (select my_taught_student_ids()));
 create policy p_tutor on attendance for all
   using (is_tutor() and student_id in (select my_taught_student_ids()))
   with check (is_tutor() and student_id in (select my_taught_student_ids()));
@@ -1775,8 +1853,8 @@ Deno.serve(async function (req) {
    the data, which is why the SQL in the Setup tab is not optional.
    ========================================================================== */
 const CONFIG = {
-  SUPABASE_URL: "",
-  SUPABASE_ANON_KEY: "",
+  SUPABASE_URL: "https://yknfuxvjgflqidzddvcn.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_ite3noPwJmQQY-sbsjssrg_9h2gcYWX",
   CENTRE_NAME: "Bell Curve Club",
   TAGLINE: "on the right side of the curve",
 };
@@ -2626,14 +2704,16 @@ ADMIN.attendance = async function (view) {
 async function attendanceSheet(sessionId) {
   const s = (await sel("sessions", q => q.eq("id", sessionId)))[0];
   const c = (await sel("classes", q => q.eq("id", s.class_id)))[0] || {};
-  const [enrols, bookings, students, att] = await Promise.all([
+  const [enrols, bookings, students, att, reports] = await Promise.all([
     sel("enrolments", q => q.eq("class_id", s.class_id).eq("status", "active")),
     sel("bookings", q => q.eq("session_id", sessionId).eq("status", "confirmed")),
     sel("students", q => q.eq("is_active", true)),
     sel("attendance", q => q.eq("session_id", sessionId)),
+    sel("absence_reports", q => q.eq("session_id", sessionId)),
   ]);
   const smap = byId(students);
   const amap = {}; att.forEach(a => (amap[a.student_id] = a));
+  const rmap = {}; reports.forEach(r => (rmap[r.student_id] = r));
 
   const ids = [];
   enrols.forEach(e => ids.includes(e.student_id) || ids.push(e.student_id));
@@ -2652,7 +2732,8 @@ async function attendanceSheet(sessionId) {
     const cur = amap[sid] ? amap[sid].status : "";
     const low = Number(st.credits) <= 0;
     return "<tr><td><b>" + esc(st.full_name) + "</b>" +
-      (low ? ' <span class="pill bad">no credits</span>' : ' <span class="pill">' + st.credits + " left</span>") + "</td>" +
+      (low ? ' <span class="pill bad">no credits</span>' : ' <span class="pill">' + st.credits + " left</span>") +
+      (rmap[sid] ? ' <span class="pill info">absence reported</span>' : "") + "</td>" +
       '<td><select name="att_' + sid + '"><option value="">— not marked —</option>' +
       opts.map(o => '<option value="' + o + '"' + (cur === o ? " selected" : "") + ">" + o[0].toUpperCase() + o.slice(1) + "</option>").join("") +
       "</select></td></tr>";
@@ -3517,34 +3598,50 @@ function noStudentYet(view) {
 
 /* Sessions a student is expected at, between two dates. */
 async function studentSessions(studentId, from, to) {
-  const [enrols, bookings] = await Promise.all([
+  const [enrols, bookings, reports] = await Promise.all([
     sel("enrolments", q => q.eq("student_id", studentId).eq("status", "active")),
     sel("bookings", q => q.eq("student_id", studentId).in("status", ["confirmed", "requested"])),
+    sel("absence_reports", q => q.eq("student_id", studentId)),
   ]);
   const classIds = enrols.map(e => e.class_id);
   const sessions = await sel("sessions", q => q.gte("session_date", from).lte("session_date", to).order("session_date").order("start_time"));
   const bmap = {}; bookings.forEach(b => (bmap[b.session_id] = b));
+  const rmap = {}; reports.forEach(r => (rmap[r.session_id] = r));
   return sessions
     .filter(s => classIds.includes(s.class_id) || bmap[s.id])
-    .map(s => Object.assign({}, s, { booking: bmap[s.id] || null }));
+    .map(s => Object.assign({}, s, { booking: bmap[s.id] || null, absenceReport: rmap[s.id] || null }));
 }
 
-function sessionCards(list, classes, showCancel) {
+function sessionCards(list, classes, showActions, studentId) {
   const cmap = byId(classes);
   if (!list.length) return emptyState("◷", "Nothing scheduled", "Open slots you can book appear on the booking page.");
   return table(["When", "Class", "Where", "Status", ""], list.map(s => {
     const c = cmap[s.class_id] || {};
     const b = s.booking;
+    const r = s.absenceReport;
+    const future = s.session_date >= today();
+    let statusPill = b
+      ? '<span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span>"
+      : '<span class="pill info">enrolled</span>';
+    if (!b && r) {
+      statusPill = r.redeemed_booking_id
+        ? '<span class="pill ok">makeup booked</span>'
+        : '<span class="pill warn">absence reported</span>';
+    }
+    let action = "";
+    if (showActions && b && b.status !== "cancelled" && future) {
+      action = '<button class="btn btn-sm btn-ghost" data-act="cancel-booking" data-id="' + b.id + '" data-date="' + s.session_date +
+        '" data-time="' + s.start_time + '">Cancel</button>';
+    } else if (showActions && !b && !r && s.status === "scheduled" && future) {
+      action = '<button class="btn btn-sm btn-ghost" data-act="report-absence" data-session="' + s.id +
+        '" data-student="' + studentId + '" data-date="' + s.session_date + '">Report absence</button>';
+    }
     return "<tr><td><b>" + esc(fmtDate(s.session_date)) + "</b><br>" + esc(fmtRange(s.start_time, s.end_time)) + "</td>" +
       "<td>" + esc(c.name || "Class") + "<br><span style='color:var(--ink-faint);font-size:12px'>" +
       esc(s.tutor_name || c.tutor_name || "") + "</span></td>" +
       "<td>" + esc(s.room || c.room || "—") + "</td>" +
-      "<td>" + (s.status === "cancelled" ? '<span class="pill bad">cancelled</span>'
-        : b ? '<span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span>"
-            : '<span class="pill info">enrolled</span>') + "</td>" +
-      '<td class="act">' + (showCancel && b && b.status !== "cancelled" && s.session_date >= today()
-        ? '<button class="btn btn-sm btn-ghost" data-act="cancel-booking" data-id="' + b.id + '" data-date="' + s.session_date +
-          '" data-time="' + s.start_time + '">Cancel</button>' : "") + "</td></tr>";
+      "<td>" + (s.status === "cancelled" ? '<span class="pill bad">cancelled</span>' : statusPill) + "</td>" +
+      '<td class="act">' + action + "</td></tr>";
   }));
 }
 
@@ -3594,40 +3691,51 @@ PARENT.schedule = async function (view) {
 
   view.innerHTML =
     pageHead("Schedule", s.full_name) + studentTabs() +
-    card("Coming up", sessionCards(upcoming, classes, true), "", true) +
-    card("Recent lessons", sessionCards(past.slice(0, 12), classes, false), "", true);
+    card("Coming up", sessionCards(upcoming, classes, true, s.id), "", true) +
+    card("Recent lessons", sessionCards(past.slice(0, 12), classes, false, s.id), "", true);
 };
 
 /* ------------------------------------------------------------ PARENT: book -- */
 async function bookableView(view) {
   if (!state.students.length) return noStudentYet(view);
   const s = currentStudent();
-  const [sessions, classes, mine] = await Promise.all([
+  const [sessions, classes, mine, reports] = await Promise.all([
     sel("sessions", q => q.eq("is_bookable", true).eq("status", "scheduled")
       .gte("session_date", today()).lte("session_date", addDays(today(), 42)).order("session_date").order("start_time")),
     sel("classes"),
     sel("bookings", q => q.eq("student_id", s.id).in("status", ["requested", "confirmed", "waitlisted"])),
+    sel("absence_reports", q => q.eq("student_id", s.id)),
   ]);
   const cmap = byId(classes);
   const taken = {}; mine.forEach(b => (taken[b.session_id] = b));
   const noCredits = Number(s.credits) <= 0;
+  const makeup = reports.filter(r => !r.redeemed_booking_id).sort((a, b) => a.reported_at.localeCompare(b.reported_at))[0] || null;
+  const makeupSession = makeup ? (await sel("sessions", q => q.eq("id", makeup.session_id)))[0] : null;
+  const makeupDate = makeupSession ? fmtDate(makeupSession.session_date) : "";
 
   const rows = sessions.map(x => {
     const c = cmap[x.class_id] || {};
     const b = taken[x.id];
+    let button = '<button class="btn btn-sm btn-mint" data-act="request-booking" data-id="' + x.id + '"' +
+      (noCredits ? " disabled" : "") + ">Request</button>";
+    if (!b && makeup) {
+      button = '<button class="btn btn-sm btn-mint" data-act="redeem-makeup" data-session="' + x.id + '" data-report="' + makeup.id + '"' +
+        (noCredits ? " disabled" : "") + '>Book — covers ' + esc(makeupDate) + " absence</button>";
+    }
     return "<tr><td><b>" + esc(fmtDate(x.session_date)) + "</b><br>" + esc(fmtRange(x.start_time, x.end_time)) + "</td>" +
       "<td>" + esc(c.name || "Class") + "<br><span style='color:var(--ink-faint);font-size:12px'>" + esc(c.level || "") + "</span></td>" +
       "<td>" + esc(x.tutor_name || c.tutor_name || "—") + "</td>" +
       '<td class="num">' + c.credits_per_session + "</td>" +
       '<td class="act">' + (b
         ? '<span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span>"
-        : '<button class="btn btn-sm btn-mint" data-act="request-booking" data-id="' + x.id + '"' +
-          (noCredits ? " disabled" : "") + ">Request</button>") + "</td></tr>";
+        : button) + "</td></tr>";
   });
 
   view.innerHTML =
     pageHead("Book a slot", "Open sessions you can ask for") + studentTabs() +
     (noCredits ? '<div class="note bad">' + esc(s.full_name) + " has no lesson credits left. Top up before booking.</div>" : "") +
+    (makeup ? '<div class="note hl">A missed lesson on ' + esc(makeupDate) +
+      " was reported in advance — book any slot below to make it up.</div>" : "") +
     card("", sessions.length ? table(["When", "Class", "Tutor", { t: "Credits", num: true }, ""], rows)
       : emptyState("▦", "No open slots right now", "The centre opens slots as they become available."), "", true);
 }
@@ -4614,6 +4722,23 @@ const ACTIONS = {
       const { error } = await db.rpc("cancel_booking", { p_booking: el.dataset.id });
       if (error) throw error;
       toast("Booking cancelled.", "ok"); render();
+    } catch (e) { fail(e); }
+  },
+  "report-absence": async el => {
+    if (!(await confirmBox("Report an absence for " + fmtDate(el.dataset.date) + "?",
+        "Lets the centre know ahead of time. You can then book any open slot to make up the lesson."))) return;
+    try {
+      const { error } = await db.rpc("report_absence", { p_session: el.dataset.session, p_student: el.dataset.student });
+      if (error) throw error;
+      toast("Absence reported.", "ok"); render();
+    } catch (e) { fail(e); }
+  },
+  "redeem-makeup": async el => {
+    try {
+      const { data, error } = await db.rpc("redeem_makeup", { p_report: el.dataset.report, p_session: el.dataset.session });
+      if (error) throw error;
+      toast(data === "confirmed" ? "Makeup booked." : data === "waitlisted" ? "Added to the waitlist." : "Request sent.", "ok");
+      render();
     } catch (e) { fail(e); }
   },
 
