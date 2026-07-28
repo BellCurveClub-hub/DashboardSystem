@@ -77,6 +77,8 @@ function fixtures() {
         status: "scheduled", is_bookable: false, tutor_name: "Mr Lim", room: "R1", notes: null },
       { id: "se6", class_id: "cl2", session_date: plus(2), start_time: "13:00", end_time: "14:30", capacity: 4,
         status: "scheduled", is_bookable: true, tutor_name: "Mr Lim", room: "R2", notes: "Fresh ad-hoc, nobody's booked it yet" },
+      { id: "se7", class_id: "cl2", session_date: plus(5), start_time: "15:00", end_time: "16:30", capacity: 4,
+        status: "scheduled", is_bookable: true, tutor_name: "Mr Lim", room: "R2", notes: "st2 is waitlisted here" },
     ],
     enrolments: [
       { id: "en1", student_id: "st1", class_id: "cl1", start_date: plus(-60), end_date: null, status: "active" },
@@ -85,6 +87,7 @@ function fixtures() {
     bookings: [
       { id: "bk1", session_id: "se2", student_id: "st2", status: "requested", booked_by: UID.parent, note: "", created_at: new Date().toISOString() },
       { id: "bk2", session_id: "se2", student_id: "st1", status: "confirmed", booked_by: UID.parent, note: "", created_at: new Date().toISOString() },
+      { id: "bk3", session_id: "se7", student_id: "st2", status: "waitlisted", booked_by: UID.parent, note: "", created_at: new Date().toISOString() },
     ],
     attendance: [{ id: "at1", session_id: "se3", student_id: "st1", status: "present", credits_charged: 1, marked_by: UID.admin, marked_at: new Date().toISOString() }],
     // st2 gave advance notice they'll miss se5 — unredeemed, so Schedule
@@ -566,6 +569,11 @@ async function runRole(roleName, userId, empty) {
     const withdrawBtn = w.document.querySelector('[data-act="withdraw-absence"]');
     check("withdraw button renders for an unredeemed absence report", !!withdrawBtn);
     check("withdraw button targets the right report", !withdrawBtn || withdrawBtn.dataset.id === "ar1");
+
+    // --- a waitlisted booking (e.g. a makeup slot with no confirmed seat
+    // free) must still show up on Schedule, with a Cancel button ---
+    const cancelBk3 = w.document.querySelector('[data-act="cancel-booking"][data-id="bk3"]');
+    check("a waitlisted booking shows a cancel button on Schedule", !!cancelBk3);
     const st1Tab = w.document.querySelector('[data-act="pick-student"][data-id="st1"]');
     if (st1Tab) { st1Tab.click(); await new Promise(r => setTimeout(r, 80)); }
 

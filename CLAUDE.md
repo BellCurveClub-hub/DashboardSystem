@@ -401,6 +401,15 @@ makeup isn't a new balance or ledger, just a record that notice was given.
   attendance register.
 - Not built: any cap on how many makeups a student can bank, or an expiry —
   by design, they don't expire, same as credits.
+- `studentSessions()` (Schedule's data source) only counted a booking as
+  "theirs" when its status was `confirmed` or `requested` — missing
+  `waitlisted`, the status a makeup (or any) booking gets when the slot
+  has no confirmed seat free. A waitlisted booking simply didn't appear
+  on Schedule at all — no pill, no Cancel button, nothing — which is what
+  "I don't see the button to cancel my makeup" actually was.
+  `bookableView`'s own `takenMap` already treated `requested`/`confirmed`/
+  `waitlisted` as the three active states; `studentSessions()` now
+  matches that.
 - Both sides of a makeup can be undone, under the same `cancel_hours`
   notice either way. `withdraw_absence_report(report)` retracts a report
   before it's redeemed (deletes the row — "actually we can make it after

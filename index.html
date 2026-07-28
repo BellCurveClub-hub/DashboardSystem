@@ -4564,7 +4564,11 @@ function noStudentYet(view) {
 async function studentSessions(studentId, from, to) {
   const [enrols, bookings, reports] = await Promise.all([
     sel("enrolments", q => q.eq("student_id", studentId).eq("status", "active")),
-    sel("bookings", q => q.eq("student_id", studentId).in("status", ["confirmed", "requested"])),
+    // "waitlisted" belongs here too — it's still an active claim on the
+    // slot (bookableView's own takenMap treats it the same way); leaving
+    // it out meant a waitlisted makeup or ad-hoc booking never showed up
+    // on Schedule at all, so there was nothing there to cancel
+    sel("bookings", q => q.eq("student_id", studentId).in("status", ["confirmed", "requested", "waitlisted"])),
     sel("absence_reports", q => q.eq("student_id", studentId)),
   ]);
   const classIds = enrols.map(e => e.class_id);
