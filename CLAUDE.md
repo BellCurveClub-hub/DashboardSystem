@@ -252,7 +252,11 @@ trip per cell.
 - Tutors manage their own pattern and time off from **My availability**
   (My teaching section for admins too, since an admin can be a class's
   tutor). No self-scheduling, no auto-assignment — this only ever changes
-  what shows as green or red for a family to *propose*.
+  what shows as green or red for a family to *propose*. A weekly pattern
+  row can be edited in place (`avail-edit`), not just removed and
+  re-added — `availabilityForm` takes an optional id the same way every
+  other edit form in the app does. Defaults for a new row are 9am–10pm;
+  a new class defaults to 3 seats.
 
 **Booking for more than one child.** Browsing (which subjects/classes show
 up, the calendar's hour band) stays scoped to whichever child's tab is

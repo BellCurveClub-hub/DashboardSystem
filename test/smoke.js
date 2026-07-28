@@ -456,6 +456,16 @@ async function runRole(roleName, userId, empty) {
     w.location.hash = "#/attendance"; await w.eval("render()"); await new Promise(r => setTimeout(r, 90));
     check("tutor register hides another tutor's lesson",
       !/Someone else/.test(w.document.querySelector("#view").textContent));
+    w.location.hash = "#/availability"; await w.eval("render()"); await new Promise(r => setTimeout(r, 90));
+    const availEditBtn = w.document.querySelector('[data-act="avail-edit"]');
+    check("availability edit button renders", !!availEditBtn);
+    if (availEditBtn) {
+      availEditBtn.click();
+      await new Promise(r => setTimeout(r, 100));
+      const startField = w.document.querySelector("#f_start_time");
+      check("availability edit opens prefilled", !!startField && startField.value === "09:00");
+      w.document.querySelector('[data-act="modal-close"]').click();
+    }
   }
   if (roleName === "admin" && !empty) {
     w.location.hash = "#/assessments"; await w.eval("render()"); await new Promise(r => setTimeout(r, 90));

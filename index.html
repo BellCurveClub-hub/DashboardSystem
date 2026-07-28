@@ -3725,7 +3725,7 @@ async function classForm(id) {
         fText("end_time", "Ends", c ? c.end_time : "17:30", { type: "time" }) +
       "</div>" +
       '<div class="grid-3">' +
-        fText("capacity", "Seats", c ? c.capacity : 8, { type: "number", min: 1 }) +
+        fText("capacity", "Seats", c ? c.capacity : 3, { type: "number", min: 1 }) +
         fText("credits_per_session", "Credits per lesson", c ? c.credits_per_session : 1, { type: "number", step: "0.5", min: 0 }) +
         fText("room", "Room", c ? c.room : "") +
       "</div>" +
@@ -5636,7 +5636,8 @@ TUTOR.availability = async function (view) {
 
   const availRows = avail.map(a =>
     "<tr><td><b>" + esc(DOW[a.day_of_week]) + "</b></td><td>" + esc(fmtRange(a.start_time, a.end_time)) + "</td>" +
-    '<td class="act"><button class="btn btn-sm btn-danger" data-act="avail-remove" data-id="' + a.id + '">Remove</button></td></tr>');
+    '<td class="act"><button class="btn btn-sm btn-ghost" data-act="avail-edit" data-id="' + a.id + '">Edit</button> ' +
+    '<button class="btn btn-sm btn-danger" data-act="avail-remove" data-id="' + a.id + '">Remove</button></td></tr>');
 
   const offRows = timeOff.map(o =>
     "<tr><td><b>" + esc(fmtDate(o.off_date)) + "</b></td>" +
@@ -5657,24 +5658,23 @@ TUTOR.availability = async function (view) {
       (offRows.length ? table(["Date", "Time", "Note", ""], offRows) : emptyState("✓", "Nothing blocked off", "")), "", true);
 };
 
-function availabilityForm() {
+async function availabilityForm(id) {
+  const a = id ? (await sel("tutor_availability", q => q.eq("id", id)))[0] : null;
   openModal({
-    title: "Add availability",
+    title: a ? "Edit availability" : "Add availability",
     body:
-      fSelect("day_of_week", "Day", "1", DOW.map((d, i) => ({ value: i, label: d }))) +
+      fSelect("day_of_week", "Day", a ? a.day_of_week : "1", DOW.map((d, i) => ({ value: i, label: d }))) +
       '<div class="grid-2">' +
-        fText("start_time", "From", "15:00", { type: "time" }) +
-        fText("end_time", "To", "20:00", { type: "time" }) +
+        fText("start_time", "From", a ? a.start_time : "09:00", { type: "time" }) +
+        fText("end_time", "To", a ? a.end_time : "22:00", { type: "time" }) +
       "</div>",
     onSave: async () => {
       const v = modalValues();
       if (v.start_time >= v.end_time) return toast("End must be after start.", "bad");
       try {
-        await ins("tutor_availability", {
-          tutor_id: state.user.id, day_of_week: Number(v.day_of_week),
-          start_time: v.start_time, end_time: v.end_time,
-        });
-        closeModal(); toast("Availability added.", "ok"); render();
+        const row = { tutor_id: state.user.id, day_of_week: Number(v.day_of_week), start_time: v.start_time, end_time: v.end_time };
+        if (a) await upd("tutor_availability", a.id, row); else await ins("tutor_availability", row);
+        closeModal(); toast("Availability saved.", "ok"); render();
       } catch (e) { fail(e); }
     },
   });
@@ -5881,6 +5881,7 @@ const ACTIONS = {
     } catch (e) { fail(e); }
   },
   "avail-add": () => availabilityForm(),
+  "avail-edit": el => availabilityForm(el.dataset.id),
   "avail-remove": async el => {
     try { await del("tutor_availability", el.dataset.id); toast("Removed.", "ok"); render(); } catch (e) { fail(e); }
   },
