@@ -62,6 +62,7 @@ function fixtures() {
       { id: "bk2", session_id: "se2", student_id: "st1", status: "confirmed", booked_by: UID.parent, note: "", created_at: new Date().toISOString() },
     ],
     attendance: [{ id: "at1", session_id: "se3", student_id: "st1", status: "present", credits_charged: 1, marked_by: UID.admin, marked_at: new Date().toISOString() }],
+    lesson_topic_grades: [],
     packages: [{ id: "pk1", name: "8-lesson Maths package", lessons: 8, price_cents: 48000, subject_id: "sub1", is_active: true }],
     invoices: [
       { id: "in1", invoice_no: "INV-2026-1000", student_id: "st1", parent_id: UID.parent, package_id: "pk1",
@@ -255,6 +256,24 @@ async function runRole(roleName, userId, empty) {
     await tryClick('[data-act="new-session"]');
     w.location.hash = "#/attendance"; await w.eval("render()"); await new Promise(r => setTimeout(r, 60));
     await tryClick('[data-act="take-attendance"]');
+
+    // --- lesson report: topic grading, summary, inline homework ---
+    w.document.querySelector('[data-act="take-attendance"]').click();
+    await new Promise(r => setTimeout(r, 120));
+    const gradeInput = w.document.querySelector('[name="grade_st1_tp1"]');
+    check("topic proficiency grid renders", !!gradeInput);
+    if (gradeInput) gradeInput.value = "82";
+    const summaryEl = w.document.querySelector("#f_lesson_summary");
+    if (summaryEl) summaryEl.value = "Covered quadratic factoring.";
+    const hwTitleEl = w.document.querySelector("#f_hw_title");
+    if (hwTitleEl) hwTitleEl.value = "Practice set 3";
+    w.document.querySelector('[data-act="modal-save"]').click();
+    await new Promise(r => setTimeout(r, 150));
+    check("lesson report save closes the modal", !w.document.querySelector(".modal"));
+    check("topic grade saved", DB.lesson_topic_grades.some(g => g.student_id === "st1" && g.topic_id === "tp1" && Number(g.score) === 82));
+    check("lesson summary saved", (DB.sessions.find(s => s.id === "se1") || {}).lesson_summary === "Covered quadratic factoring.");
+    check("inline homework created", DB.homework.some(h => h.title === "Practice set 3" && h.student_id === "st1"));
+
     w.location.hash = "#/billing"; await w.eval("render()"); await new Promise(r => setTimeout(r, 60));
     await tryClick('[data-act="new-invoice"]');
     w.location.hash = "#/homework"; await w.eval("render()"); await new Promise(r => setTimeout(r, 60));

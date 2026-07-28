@@ -157,7 +157,22 @@ plus a focused Tutors page for approvals and who's teaching what · admins
 can also be a class's tutor and get the matching "My teaching" views ·
 tutor self sign-up gated behind admin approval (see below) · self-service
 change email, change password and (pending SMS provider setup) phone
-verification in My account.
+verification in My account · lesson reports from the register: topics
+covered graded per student, a free-text summary, and inline homework (see
+below).
+
+**Lesson reports.** Folded into the existing "Mark the register" modal,
+since that's already the after-lesson touchpoint — no separate screen.
+
+- A grid of topics (from the class's subject) × attending students, each
+  cell a 0–100 score. `lesson_topic_grades` is a new table, not an override:
+  each save is one more sample `recompute_mastery()` averages over the last
+  8, same as graded homework and approved centre tests already do — a trend
+  builds up lesson by lesson instead of one score replacing the last.
+- A free-text "what was covered" summary lives on `sessions.lesson_summary`.
+- Homework can be assigned inline to everyone in the register in the same
+  save, reusing the bulk-assign-to-class insert `homeworkForm` already does.
+- All three are optional — leaving them blank behaves exactly as before.
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a
