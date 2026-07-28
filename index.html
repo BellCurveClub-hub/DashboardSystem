@@ -4633,7 +4633,8 @@ async function bookableView(view) {
         let action = '<button class="btn btn-sm btn-mint" data-act="request-booking" data-id="' + x.id + '"' +
           (noCredits ? " disabled" : "") + ">Request</button>";
         if (!b && makeup) {
-          action = '<button class="btn btn-sm btn-mint" data-act="redeem-makeup" data-session="' + x.id + '" data-report="' + makeup.id + '"' +
+          action = '<button class="btn btn-sm btn-mint" style="white-space:normal;width:100%;line-height:1.3" ' +
+            'data-act="redeem-makeup" data-session="' + x.id + '" data-report="' + makeup.id + '"' +
             (noCredits ? " disabled" : "") + ">Makes up " + esc(makeupDate) + "</button>";
         }
         body = b ? '<span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span>" : action;
