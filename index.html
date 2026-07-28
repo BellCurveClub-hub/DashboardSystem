@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bell Curve Club — Centre Portal</title>
 <meta name="description" content="Booking, schedule, lesson credits, billing, homework and rewards for Bell Curve Club.">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjAgNjQiPjxyZWN0IHdpZHRoPSIxMjAiIGhlaWdodD0iNjQiIHJ4PSIxNiIgZmlsbD0iIzJFM0E1OSIvPjxwYXRoIGQ9Ik0gMzYgNTYgTCAzNiA1MS4xMSBMIDM4IDQ5Ljc3IEwgNDAgNDguMTggTCA0MiA0Ni4zMSBMIDQ0IDQ0LjE1IEwgNDYgNDEuNzIgTCA0OCAzOS4wMiBMIDUwIDM2LjA5IEwgNTIgMzIuOTcgTCA1NCAyOS43NCBMIDU2IDI2LjQ2IEwgNTggMjMuMjMgTCA2MCAyMC4xNCBMIDYyIDE3LjMxIEwgNjQgMTQuODIgTCA2NiAxMi43OCBMIDY4IDExLjI2IEwgNzAgMTAuMzIgTCA3MiAxMC4wIEwgNzQgMTAuMzIgTCA3NiAxMS4yNiBMIDc4IDEyLjc4IEwgODAgMTQuODIgTCA4MiAxNy4zMSBMIDg0IDIwLjE0IEwgODYgMjMuMjMgTCA4OCAyNi40NiBMIDkwIDI5Ljc0IEwgOTIgMzIuOTcgTCA5NCAzNi4wOSBMIDk2IDM5LjAyIEwgOTggNDEuNzIgTCAxMDAgNDQuMTUgTCAxMDIgNDYuMzEgTCAxMDQgNDguMTggTCAxMDYgNDkuNzcgTCAxMDggNTEuMTEgTCAxMDggNTYgWiIgZmlsbD0iI0ZGRTQ1RSIvPjxjaXJjbGUgY3g9IjcyIiBjeT0iMTAiIHI9IjgiIGZpbGw9IiNGMjY2NEIiLz48L3N2Zz4K">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -762,7 +763,10 @@ for each row execute function fn_new_user();
 create or replace function fn_profile_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  if not is_admin() then
+  -- only guard signed-in app sessions; direct database access (SQL editor,
+  -- table editor, service role) is already fully privileged, and this is
+  -- how the very first admin gets promoted
+  if auth.uid() is not null and not is_admin() then
     new.role := old.role;
     new.is_active := old.is_active;
   end if;
@@ -1239,6 +1243,9 @@ language sql stable security definer set search_path = public as $$
                   where id = auth.uid() and role::text in ('admin','tutor'));
 $$;
 
+alter table classes  add column if not exists tutor_id uuid references profiles(id) on delete set null;
+alter table sessions add column if not exists tutor_id uuid references profiles(id) on delete set null;
+
 -- The students a tutor actually teaches: enrolled in one of their classes, or
 -- booked into one of their sessions.
 create or replace function my_taught_student_ids() returns setof uuid
@@ -1252,9 +1259,6 @@ language sql stable security definer set search_path = public as $$
     join classes c2 on c2.id = se.class_id
    where b.status = 'confirmed' and coalesce(se.tutor_id, c2.tutor_id) = auth.uid();
 $$;
-
-alter table classes  add column if not exists tutor_id uuid references profiles(id) on delete set null;
-alter table sessions add column if not exists tutor_id uuid references profiles(id) on delete set null;
 
 -- --------------------------------------------------------- grading scales --
 create table if not exists grading_scales (
@@ -2155,6 +2159,11 @@ const NAV = {
     { r: "schedule",   t: "Schedule",     i: "▦" },
     { r: "bookings",   t: "Booking requests", i: "✎", count: "bookings" },
     { r: "attendance", t: "Attendance",   i: "✓" },
+    { g: "My teaching" },
+    { r: "teaching",     t: "Today (mine)",  i: "◱" },
+    { r: "myschedule",   t: "My schedule",   i: "▦" },
+    { r: "myattendance", t: "My attendance", i: "✓" },
+    { r: "mystudents",   t: "My students",   i: "☺" },
     { g: "People" },
     { r: "students",   t: "Students",     i: "☺" },
     { r: "classes",    t: "Classes",      i: "▤" },
@@ -2962,7 +2971,7 @@ ADMIN.classes = async function (view) {
 async function classForm(id) {
   const c = id ? (await sel("classes", q => q.eq("id", id)))[0] : null;
   const subjects = await sel("subjects", q => q.order("name"));
-  const tutors = await sel("profiles", q => q.eq("role", "tutor").order("full_name"));
+  const tutors = await sel("profiles", q => q.in("role", ["tutor", "admin"]).order("full_name"));
   openModal({
     title: c ? "Edit " + c.name : "Add a class",
     body:
@@ -4602,6 +4611,33 @@ TUTOR.assessments = async function (view) {
 
 TUTOR.homework = ADMIN.homework;
 TUTOR.account = accountView;
+
+/* ---------------------------------------------------------------------------
+   An admin who also personally teaches gets the same "what's mine" views a
+   tutor gets, alongside the full centre-wide admin ones. overview/schedule/
+   attendance scope purely by tutor_id === my id (myClassIds/mine), which
+   works for any role, so they're reused as-is. students, though, is scoped
+   by the database's is_tutor()-only RLS policy, so admin needs its own copy.
+   --------------------------------------------------------------------------- */
+ADMIN.teaching     = TUTOR.overview;
+ADMIN.myschedule   = TUTOR.schedule;
+ADMIN.myattendance = TUTOR.attendance;
+
+ADMIN.mystudents = async function (view) {
+  const { ids: classIds } = await myClassIds();
+  const enrols = classIds.length ? await sel("enrolments", q => q.in("class_id", classIds).eq("status", "active")) : [];
+  const studentIds = [...new Set(enrols.map(e => e.student_id))];
+  const students = studentIds.length ? await sel("students", q => q.in("id", studentIds).order("full_name")) : [];
+  view.innerHTML =
+    pageHead("My students", students.length + " in your classes") +
+    card("", students.length
+      ? table(["Student", "Level", "School", { t: "Credits", num: true }, ""], students.map(s =>
+          "<tr><td><b>" + esc(s.full_name) + "</b></td><td>" + esc(s.level || "—") + "</td>" +
+          "<td>" + esc(s.school || "—") + "</td>" +
+          '<td class="num">' + s.credits + "</td>" +
+          '<td class="act"><button class="btn btn-sm btn-ghost" data-act="tutor-student" data-id="' + s.id + '">Progress</button></td></tr>'))
+      : emptyState("☺", "No students yet", "They appear once you are set as the tutor on a class with enrolments."), "", true);
+};
 
 /* ============================================================================
    EVENTS — one delegated handler for the whole page
