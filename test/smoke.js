@@ -13,7 +13,7 @@ const D = () => {
 };
 const plus = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
 
-const UID = { admin: "u-admin", tutor: "u-tutor", parent: "u-parent", student: "u-student" };
+const UID = { admin: "u-admin", tutor: "u-tutor", parent: "u-parent", student: "u-student", pendingTutor: "u-pending-tutor" };
 
 function fixtures() {
   return {
@@ -22,6 +22,7 @@ function fixtures() {
       { id: UID.tutor, role: "tutor", full_name: "Mr Lim", email: "lim@x.sg", phone: "9333 3333", is_active: true },
       { id: UID.parent, role: "parent", full_name: "Mrs Tan", email: "tan@x.sg", phone: "9222 2222", is_active: true },
       { id: UID.student, role: "student", full_name: "Tan Wei Ling", email: "wl@x.sg", phone: null, is_active: true },
+      { id: UID.pendingTutor, role: "pending_tutor", full_name: "Ms Goh", email: "goh@x.sg", phone: "9444 4444", is_active: true },
     ],
     students: [
       { id: "st1", profile_id: UID.student, parent_id: UID.parent, full_name: "Tan Wei Ling", level: "Sec 3 G3",
@@ -400,7 +401,7 @@ async function runGate() {
   console.log(EMPTY ? "(empty database)" : "(with sample data)");
   console.log("=== SIGNED OUT ===");
   (await runGate()).forEach(l => { if (l.startsWith("  FAIL")) fails++; console.log(l); });
-  for (const [role, uid] of [["admin", UID.admin], ["tutor", UID.tutor], ["parent", UID.parent], ["student", UID.student]]) {
+  for (const [role, uid] of [["admin", UID.admin], ["tutor", UID.tutor], ["parent", UID.parent], ["student", UID.student], ["pending_tutor", UID.pendingTutor]]) {
     const { results, errors, modals, checks } = await runRole(role, uid, EMPTY);
     console.log("\n=== " + role.toUpperCase() + " ===");
     results.forEach(r => {

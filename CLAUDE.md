@@ -3,7 +3,9 @@
 A tuition centre management system for a Singapore centre. One static
 `index.html`, talking to Supabase. Deployed on GitHub Pages.
 
-Four roles behind one login: **admin**, **tutor**, **parent**, **student**.
+Four roles behind one login: **admin**, **tutor**, **parent**, **student** —
+plus **pending_tutor**, a holding state for a tutor sign-up nobody has
+approved yet. It sees nothing but its own waiting screen.
 
 ---
 
@@ -150,7 +152,9 @@ invoices, manual payment recording, printable invoice/receipt · reward shelf
 and redemption queue · homework assign/submit/grade · topic proficiency
 scoring · test results (centre and school) with grading scales, approval
 queue and report-slip storage · CSV exports · settings · makeup lessons for
-absences (see below).
+absences (see below) · an Accounts admin page for changing anyone's role ·
+admins can also be a class's tutor and get the matching "My teaching" views ·
+tutor self sign-up gated behind admin approval (see below).
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a
@@ -173,6 +177,20 @@ makeup isn't a new balance or ledger, just a record that notice was given.
   attendance register.
 - Not built: any cap on how many makeups a student can bank, or an expiry —
   by design, they don't expire, same as credits.
+
+**Tutor sign-up.** The sign-up screen offers "A tutor" alongside parent and
+student, but a tutor sign-up never lands as `tutor` directly.
+
+- `fn_new_user()` maps a tutor sign-up to the `pending_tutor` role instead.
+  `is_tutor()`/`is_staff()` only ever match the literal `'tutor'`, so a
+  pending account is invisible to every student, schedule, attendance and
+  homework policy — it only ever sees its own "awaiting approval" screen.
+- An admin approves (or rejects back to parent) from **Accounts**, the same
+  role-picker used for every other promotion — no separate queue or RPC.
+  The Accounts nav badge counts pending sign-ups, same pattern as booking
+  requests and redemptions.
+- Admin accounts still can't be self-signed-up for — that hint stays on the
+  sign-up form.
 
 **Next, in order:**
 
