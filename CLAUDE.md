@@ -163,7 +163,8 @@ below) · Book a slot also surfaces fixed classes with a spare seat, not
 just dedicated ad-hoc sessions (see below) · families can propose a custom
 day/time nothing else covers, admin accepts and schedules it or declines
 (see below) · Progress shows a tab per subject for a student tracked in
-more than one.
+more than one · Book a slot is a week calendar with tutor-availability
+chips, not just a list (see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -223,6 +224,31 @@ subject, to avoid a pointless single tab. Switching tabs (`state.
 progressSubject`) filters both the topic-by-topic bars and the recent
 graded work table together, so "Average score" and "Topics tracked"
 always describe the selected subject, not the student's whole record.
+
+**Tutor availability, and the Book a slot calendar.** `tutor_availability`
+(a weekly recurring pattern per tutor) and `tutor_time_off` (one-off
+exceptions on top of it — a day off, an appointment) are never read
+directly by a family; both are admin- and owning-tutor-only in RLS. The
+calendar only ever gets a count back, from `tutor_availability_grid()`, a
+`SECURITY DEFINER` RPC that checks the weekly pattern minus time off minus
+whatever that tutor is already assigned to (`sessions` joined to
+`classes.tutor_id`) — one call for the whole visible week, not one round
+trip per cell.
+
+- Book a slot's hour band is derived from actual class *and session*
+  times, not guessed — ad-hoc classes have no `start_time`/`end_time` of
+  their own (each session sets its own), so deriving from `classes` alone
+  silently misses them.
+- A cell with an existing bookable session (ad-hoc, or a fixed class with
+  a spare seat) shows that session, clickable, same as before. A cell with
+  no session but `tutors_free > 0` is a green chip — clicking it opens
+  **Request a lesson** pre-filled with that date and hour; it still goes
+  to admin for approval, same as the plain "Request a lesson" button.
+  `tutors_free = 0` is a red, inert chip.
+- Tutors manage their own pattern and time off from **My availability**
+  (My teaching section for admins too, since an admin can be a class's
+  tutor). No self-scheduling, no auto-assignment — this only ever changes
+  what shows as green or red for a family to *propose*.
 
 **Makeup lessons.** A missed fixed-class session never actually costs a
 credit — the attendance trigger only charges on `present`/`late` — so a

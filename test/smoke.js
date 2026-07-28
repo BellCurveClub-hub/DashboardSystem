@@ -156,7 +156,50 @@ function fixtures() {
       { key: "points_score_100", value: { n: 5 } },
       { key: "points_per_band_improved", value: { n: 15 } },
     ],
+    // the tutor is free 09:00-17:00 every day of the week -- deterministic
+    // regardless of which real weekday the tests happen to run on, and
+    // narrow enough that hours past 17:00 (within the ~10-21 band the
+    // fixture classes imply) are reliably "nobody free" for the busy check
+    tutor_availability: [0, 1, 2, 3, 4, 5, 6].map(dow =>
+      ({ id: "ta" + dow, tutor_id: UID.tutor, day_of_week: dow, start_time: "09:00", end_time: "17:00" })),
+    tutor_time_off: [],
   };
+}
+
+/* Mirrors tutor_availability_grid()'s SQL in JS, since the fake RPC below
+   has no database to run the real function against. */
+function computeAvailabilityGrid(DB, args) {
+  const rows = [];
+  const tutors = DB.profiles.filter(p => p.role === "tutor" || p.role === "admin");
+  let d = new Date(args.p_from + "T00:00:00");
+  const end = new Date(args.p_to + "T00:00:00");
+  while (d <= end) {
+    const dateStr = d.toISOString().slice(0, 10);
+    const dow = d.getDay();
+    for (let h = args.p_start_hour; h < args.p_end_hour; h++) {
+      const hStart = String(h).padStart(2, "0") + ":00";
+      const hEnd = String(h + 1).padStart(2, "0") + ":00";
+      let free = 0;
+      tutors.forEach(t => {
+        const avail = (DB.tutor_availability || []).some(a =>
+          a.tutor_id === t.id && a.day_of_week === dow && a.start_time <= hStart && a.end_time >= hEnd);
+        if (!avail) return;
+        const blocked = (DB.tutor_time_off || []).some(o => o.tutor_id === t.id && o.off_date === dateStr &&
+          (o.start_time == null || (o.start_time < hEnd && o.end_time > hStart)));
+        if (blocked) return;
+        const busy = (DB.sessions || []).some(se => {
+          const cls = (DB.classes || []).find(c => c.id === se.class_id) || {};
+          const tid = se.tutor_id || cls.tutor_id;
+          return tid === t.id && se.session_date === dateStr && se.status === "scheduled" &&
+            se.start_time < hEnd && se.end_time > hStart;
+        });
+        if (!busy) free++;
+      });
+      rows.push({ slot_date: dateStr, slot_hour: h, tutors_free: free });
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return rows;
 }
 
 function makeClient(DB, userId) {
@@ -201,7 +244,10 @@ function makeClient(DB, userId) {
       verifyOtp: async () => ({ error: null }),
     },
     from: query,
-    rpc: async () => ({ data: 4, error: null }),
+    rpc: async (fn, args) => {
+      if (fn === "tutor_availability_grid") return { data: computeAvailabilityGrid(DB, args || {}), error: null };
+      return { data: 4, error: null };
+    },
     storage: {
       from: () => ({
         createSignedUrl: async p => ({ data: { signedUrl: "https://files.test/" + p }, error: null }),
@@ -412,6 +458,24 @@ async function runRole(roleName, userId, empty) {
     const btxt = w.document.querySelector("#view").textContent;
     check("open fixed class with a spare seat shows up in Book a slot", /Sec 3 G3 A-Math \(Fri\)/.test(btxt));
     check("shows how many seats are left", /3 seats left/.test(btxt));
+
+    // --- calendar: availability chips, and requesting from a green one ---
+    check("free (green) chips render where a tutor is free and nothing's booked",
+      w.document.querySelectorAll(".slot-chip.free").length > 0);
+    check("busy (red) chips render where no tutor is free",
+      w.document.querySelectorAll(".slot-chip.busy").length > 0);
+    const freeChip = w.document.querySelector('.slot-chip.free[data-hour="12"]');
+    check("a specific known-free hour (noon) has a free chip", !!freeChip);
+    if (freeChip) {
+      const chipDate = freeChip.dataset.date;
+      freeChip.click();
+      await new Promise(r => setTimeout(r, 100));
+      check("clicking a free chip opens the request form", !!w.document.querySelector("#f_requested_date"));
+      check("the form is pre-filled with the clicked date and hour",
+        w.document.querySelector("#f_requested_date").value === chipDate &&
+        w.document.querySelector("#f_requested_time").value === "12:00");
+      w.document.querySelector('[data-act="modal-close"]').click();
+    }
 
     // --- progress: subject tabs for a student with more than one subject ---
     w.location.hash = "#/progress"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));

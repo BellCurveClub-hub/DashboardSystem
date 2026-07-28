@@ -322,6 +322,13 @@ table.tbl td.act{text-align:right; white-space:nowrap}
 .sess .t{font-size:11.5px; color:var(--ink-soft); font-variant-numeric:tabular-nums; font-weight:600}
 .sess .n{font-size:13px; font-weight:600; color:var(--ink-800); line-height:1.25; margin:1px 0}
 .sess .m{font-size:11.5px; color:var(--ink-soft)}
+.slot-chip{
+  margin:5px 7px 0; padding:6px 8px; border-radius:var(--r-sm); font-size:11.5px;
+  font-weight:600; text-align:center; font-variant-numeric:tabular-nums;
+}
+.slot-chip.free{background:var(--mint-100); color:var(--mint-600); cursor:pointer; transition:background .12s}
+.slot-chip.free:hover{background:#BFEAE4}
+.slot-chip.busy{background:#FBEAE7; color:#B23A2A; opacity:.7; cursor:not-allowed}
 
 /* ============================================================
    PROGRESS / MASTERY
@@ -1876,6 +1883,88 @@ drop policy if exists p_upd  on lesson_requests;
 create policy p_read on lesson_requests for select using (is_admin() or student_id in (select my_student_ids()));
 create policy p_ins  on lesson_requests for insert with check (is_admin() or student_id in (select my_student_ids()));
 create policy p_upd  on lesson_requests for update using (is_admin()) with check (is_admin());
+
+-- ===========================================================================
+-- PART 7 — Tutor availability, and a free-tutor count for the calendar
+-- Added after the first release. Safe to run on an existing database.
+--
+-- Book a slot's calendar needs to know whether ANY tutor could cover a
+-- given day and hour, without ever exposing whose schedule that is to a
+-- family — so this is read only through tutor_availability_grid(), a
+-- SECURITY DEFINER RPC that returns counts, never raw rows. The two
+-- tables it draws from stay admin- and owning-tutor-only.
+-- ===========================================================================
+create table if not exists tutor_availability (
+  id          uuid primary key default gen_random_uuid(),
+  tutor_id    uuid not null references profiles(id) on delete cascade,
+  day_of_week int not null check (day_of_week between 0 and 6),
+  start_time  time not null,
+  end_time    time not null,
+  created_at  timestamptz not null default now()
+);
+create index if not exists tutor_availability_tutor_idx on tutor_availability(tutor_id, day_of_week);
+
+create table if not exists tutor_time_off (
+  id          uuid primary key default gen_random_uuid(),
+  tutor_id    uuid not null references profiles(id) on delete cascade,
+  off_date    date not null,
+  start_time  time,   -- null start and end together means the whole day
+  end_time    time,
+  note        text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists tutor_time_off_tutor_idx on tutor_time_off(tutor_id, off_date);
+
+alter table tutor_availability enable row level security;
+alter table tutor_time_off enable row level security;
+drop policy if exists p_read  on tutor_availability;
+drop policy if exists p_write on tutor_availability;
+drop policy if exists p_read  on tutor_time_off;
+drop policy if exists p_write on tutor_time_off;
+
+-- a tutor manages only their own; admin manages anyone's — nobody else
+-- ever reads these directly, only through the RPC below
+create policy p_read  on tutor_availability for select using (is_admin() or tutor_id = auth.uid());
+create policy p_write on tutor_availability for all using (is_admin() or tutor_id = auth.uid()) with check (is_admin() or tutor_id = auth.uid());
+create policy p_read  on tutor_time_off for select using (is_admin() or tutor_id = auth.uid());
+create policy p_write on tutor_time_off for all using (is_admin() or tutor_id = auth.uid()) with check (is_admin() or tutor_id = auth.uid());
+
+-- how many tutors (or admins, since an admin can be a class's tutor too)
+-- could cover each hour of each day in the range — one call for a whole
+-- week's calendar, rather than one round trip per cell
+create or replace function tutor_availability_grid(p_from date, p_to date, p_start_hour int default 9, p_end_hour int default 21)
+returns table(slot_date date, slot_hour int, tutors_free int)
+language plpgsql stable security definer set search_path = public as $$
+declare d date; h int; hstart time; hend time; n int;
+begin
+  d := p_from;
+  while d <= p_to loop
+    h := p_start_hour;
+    while h < p_end_hour loop
+      hstart := make_time(h, 0, 0);
+      hend := make_time(h + 1, 0, 0);
+      select count(*) into n from profiles p
+       where p.role::text in ('tutor', 'admin')
+         and exists (
+           select 1 from tutor_availability a
+            where a.tutor_id = p.id and a.day_of_week = extract(dow from d)::int
+              and a.start_time <= hstart and a.end_time >= hend)
+         and not exists (
+           select 1 from tutor_time_off o
+            where o.tutor_id = p.id and o.off_date = d
+              and (o.start_time is null or (o.start_time < hend and o.end_time > hstart)))
+         and not exists (
+           select 1 from sessions se join classes c on c.id = se.class_id
+            where coalesce(se.tutor_id, c.tutor_id) = p.id
+              and se.session_date = d and se.status = 'scheduled'
+              and se.start_time < hend and se.end_time > hstart);
+      slot_date := d; slot_hour := h; tutors_free := n;
+      return next;
+      h := h + 1;
+    end loop;
+    d := d + 1;
+  end loop;
+end $$;
 `;
 
 /* ============================================================================
@@ -2374,6 +2463,7 @@ const NAV = {
     { r: "myschedule",   t: "My schedule",   i: "▦" },
     { r: "myattendance", t: "My attendance", i: "✓" },
     { r: "mystudents",   t: "My students",   i: "☺" },
+    { r: "myavailability", t: "My availability", i: "◔" },
     { g: "People" },
     { r: "students",   t: "Students",     i: "☺" },
     { r: "tutors",     t: "Tutors",       i: "◔", count: "pendingTutors" },
@@ -2396,13 +2486,14 @@ const NAV = {
     { r: "setup",      t: "Setup & SQL",  i: "⌘" },
   ],
   tutor: [
-    { r: "overview",    t: "Today",       i: "◱" },
-    { r: "schedule",    t: "My schedule", i: "▦" },
-    { r: "attendance",  t: "Attendance",  i: "✓" },
-    { r: "students",    t: "My students", i: "☺" },
-    { r: "homework",    t: "Homework",    i: "✐" },
-    { r: "assessments", t: "Test results", i: "◎" },
-    { r: "account",     t: "My account",  i: "⚙" },
+    { r: "overview",     t: "Today",         i: "◱" },
+    { r: "schedule",     t: "My schedule",   i: "▦" },
+    { r: "attendance",   t: "Attendance",    i: "✓" },
+    { r: "students",     t: "My students",   i: "☺" },
+    { r: "homework",     t: "Homework",      i: "✐" },
+    { r: "assessments",  t: "Test results",  i: "◎" },
+    { r: "availability", t: "My availability", i: "◔" },
+    { r: "account",      t: "My account",    i: "⚙" },
   ],
   parent: [
     { r: "overview", t: "Overview",  i: "◱" },
@@ -2673,6 +2764,7 @@ function weekStartOf(dstr) {
 }
 state.weekStart = weekStartOf(today());
 state.attDate = today();
+state.bookFrom = today();
 
 /* ------------------------------------------------------------- OVERVIEW ---- */
 ADMIN.overview = async function (view) {
@@ -4202,9 +4294,10 @@ PARENT.schedule = async function (view) {
 async function bookableView(view) {
   if (!state.students.length) return noStudentYet(view);
   const s = currentStudent();
+  const wFrom = state.bookFrom, wTo = addDays(wFrom, 6);
   const [adhocSessions, classes, mine, reports, myEnrols, allEnrols, myRequests, subjects] = await Promise.all([
     sel("sessions", q => q.eq("is_bookable", true).eq("status", "scheduled")
-      .gte("session_date", today()).lte("session_date", addDays(today(), 42)).order("session_date").order("start_time")),
+      .gte("session_date", wFrom).lte("session_date", wTo).order("session_date").order("start_time")),
     sel("classes", q => q.eq("is_active", true)),
     sel("bookings", q => q.eq("student_id", s.id).in("status", ["requested", "confirmed", "waitlisted"])),
     sel("absence_reports", q => q.eq("student_id", s.id)),
@@ -4228,7 +4321,7 @@ async function bookableView(view) {
 
   const openFixedSessions = openClasses.length ? await sel("sessions", q =>
     q.in("class_id", openClasses.map(c => c.id)).eq("status", "scheduled")
-     .gte("session_date", today()).lte("session_date", addDays(today(), 42))
+     .gte("session_date", wFrom).lte("session_date", wTo)
      .order("session_date").order("start_time")) : [];
 
   const seen = {};
@@ -4240,33 +4333,85 @@ async function bookableView(view) {
   const makeupSession = makeup ? (await sel("sessions", q => q.eq("id", makeup.session_id)))[0] : null;
   const makeupDate = makeupSession ? fmtDate(makeupSession.session_date) : "";
 
-  const rows = sessions.map(x => {
-    const c = cmap[x.class_id] || {};
-    const b = taken[x.id];
-    const isOpenClass = seatsLeft[x.class_id] !== undefined;
-    let button = '<button class="btn btn-sm btn-mint" data-act="request-booking" data-id="' + x.id + '"' +
-      (noCredits ? " disabled" : "") + ">Request</button>";
-    if (!b && makeup) {
-      button = '<button class="btn btn-sm btn-mint" data-act="redeem-makeup" data-session="' + x.id + '" data-report="' + makeup.id + '"' +
-        (noCredits ? " disabled" : "") + '>Book — covers ' + esc(makeupDate) + " absence</button>";
+  // the hour band worth drawing — derived from actual class and session
+  // times rather than a guessed-at fixed range. Ad-hoc classes have no
+  // start_time/end_time of their own (each session sets its own), so
+  // fixed classes alone would silently miss them — this looks at both.
+  let hFrom = 24, hTo = 0;
+  const spanHours = (start, end) => {
+    if (!start || !end) return;
+    hFrom = Math.min(hFrom, Number(start.slice(0, 2)));
+    hTo = Math.max(hTo, Number(end.slice(0, 2)) + (end.slice(3, 5) > "00" ? 1 : 0));
+  };
+  classes.forEach(c => spanHours(c.start_time, c.end_time));
+  sessions.forEach(x => spanHours(x.start_time, x.end_time));
+  if (hFrom > hTo) { hFrom = 14; hTo = 21; }
+
+  // one RPC call for the whole week's grid, rather than one per cell — and
+  // only bother at all once there's a subject to actually browse for
+  let freeMap = {};
+  if (mySubjects.size) {
+    const { data, error } = await db.rpc("tutor_availability_grid", { p_from: wFrom, p_to: wTo, p_start_hour: hFrom, p_end_hour: hTo });
+    if (!error && Array.isArray(data)) data.forEach(g => (freeMap[g.slot_date + "_" + g.slot_hour] = g.tutors_free));
+  }
+
+  const sessByCell = {};
+  sessions.forEach(x => (sessByCell[x.session_date + "_" + Number(x.start_time.slice(0, 2))] = x));
+
+  const cellFor = (d, h) => {
+    const key = d + "_" + h;
+    const x = sessByCell[key];
+    if (x) {
+      const c = cmap[x.class_id] || {};
+      const b = taken[x.id];
+      const isOpenClass = seatsLeft[x.class_id] !== undefined;
+      let action = '<button class="btn btn-sm btn-mint" data-act="request-booking" data-id="' + x.id + '"' +
+        (noCredits ? " disabled" : "") + ">Request</button>";
+      if (!b && makeup) {
+        action = '<button class="btn btn-sm btn-mint" data-act="redeem-makeup" data-session="' + x.id + '" data-report="' + makeup.id + '"' +
+          (noCredits ? " disabled" : "") + ">Makes up " + esc(makeupDate) + "</button>";
+      }
+      return '<div class="sess' + (isOpenClass ? " adhoc" : "") + '">' +
+        '<div class="t">' + esc(fmtRange(x.start_time, x.end_time)) + "</div>" +
+        '<div class="n">' + esc(c.name || "Class") + "</div>" +
+        (isOpenClass ? '<div class="m">' + seatsLeft[x.class_id] + " seat" + (seatsLeft[x.class_id] === 1 ? "" : "s") + " left</div>" : "") +
+        '<div style="margin-top:5px">' + (b
+          ? '<span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span>"
+          : action) + "</div></div>";
     }
-    return "<tr><td><b>" + esc(fmtDate(x.session_date)) + "</b><br>" + esc(fmtRange(x.start_time, x.end_time)) + "</td>" +
-      "<td>" + esc(c.name || "Class") + "<br><span style='color:var(--ink-faint);font-size:12px'>" + esc(c.level || "") + "</span>" +
-      (isOpenClass ? ' <span class="pill info">' + seatsLeft[x.class_id] + " seat" + (seatsLeft[x.class_id] === 1 ? "" : "s") + " left</span>" : "") + "</td>" +
-      "<td>" + esc(x.tutor_name || c.tutor_name || "—") + "</td>" +
-      '<td class="num">' + c.credits_per_session + "</td>" +
-      '<td class="act">' + (b
-        ? '<span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span>"
-        : button) + "</td></tr>";
-  });
+    const free = freeMap[key];
+    if (free === undefined) return "";
+    return free > 0
+      ? '<div class="slot-chip free" data-act="calendar-request-lesson" data-date="' + d + '" data-hour="' + h +
+        '">' + esc(fmtTime(String(h).padStart(2, "0") + ":00")) + "<br>free</div>"
+      : '<div class="slot-chip busy" title="No tutor free at this time">' + esc(fmtTime(String(h).padStart(2, "0") + ":00")) + "</div>";
+  };
+
+  const hours = []; for (let h = hFrom; h < hTo; h++) hours.push(h);
+  const cols = [];
+  for (let i = 0; i < 7; i++) {
+    const d = addDays(wFrom, i);
+    cols.push('<div class="week-col' + (d === today() ? " today" : "") + '">' +
+      '<div class="dh">' + DOW3[new Date(d + "T00:00:00").getDay()] + " <b>" + fmtDateShort(d) + "</b></div>" +
+      hours.map(h => cellFor(d, h)).join("") + "</div>");
+  }
 
   view.innerHTML =
-    pageHead("Book a slot", "Open sessions and classes with a spare seat") + studentTabs() +
+    pageHead("Book a slot", "Open sessions, classes with a spare seat, and times a tutor could cover",
+      '<div class="btn-row">' +
+        '<button class="btn btn-ghost" data-act="book-week" data-d="-7"' + (wFrom <= today() ? " disabled" : "") + '>‹ Previous</button>' +
+        '<button class="btn btn-ghost" data-act="book-week" data-d="0">This week</button>' +
+        '<button class="btn btn-ghost" data-act="book-week" data-d="7">Next ›</button></div>') +
+    studentTabs() +
     (noCredits ? '<div class="note bad">' + esc(s.full_name) + " has no lesson credits left. Top up before booking.</div>" : "") +
     (makeup ? '<div class="note hl">A missed lesson on ' + esc(makeupDate) +
-      " was reported in advance — book any slot below to make it up.</div>" : "") +
-    card("", sessions.length ? table(["When", "Class", "Tutor", { t: "Credits", num: true }, ""], rows)
-      : emptyState("▦", "No open slots right now", "The centre opens slots as they become available."), "", true) +
+      " was reported in advance — book any open slot below to make it up.</div>" : "") +
+    (mySubjects.size ? "" : '<div class="note">Once ' + esc(s.full_name) +
+      " is enrolled in a class, open slots and available times for that subject show up here.</div>") +
+    card(fmtDate(wFrom) + " – " + fmtDate(wTo),
+      '<div class="tbl-wrap"><div class="week-grid">' + cols.join("") + "</div></div>" +
+      "<p class='hint' style='margin-top:12px'>Green — a tutor could cover this time; propose it below. Red — nobody's free. Class cards book instantly.</p>",
+      "", true) +
     card("Don't see a time that works?",
       "<p class='hint' style='margin-bottom:12px'>Propose a day and time — the centre will confirm it and assign a tutor.</p>" +
       '<button class="btn btn-mint" data-act="lesson-request">Request a lesson</button>' +
@@ -4281,7 +4426,7 @@ async function bookableView(view) {
 PARENT.book = bookableView;
 STUDENT.book = bookableView;
 
-async function lessonRequestForm() {
+async function lessonRequestForm(presetDate, presetHour) {
   const s = currentStudent();
   const subjects = await sel("subjects", q => q.order("name"));
   openModal({
@@ -4289,8 +4434,8 @@ async function lessonRequestForm() {
     body:
       fSelect("subject_id", "Subject", "", subjects.map(x => ({ value: x.id, label: x.name })), { blank: "— choose —" }) +
       '<div class="grid-2">' +
-        fText("requested_date", "Preferred date", addDays(today(), 3), { type: "date" }) +
-        fText("requested_time", "Preferred time", "16:00", { type: "time" }) +
+        fText("requested_date", "Preferred date", presetDate || addDays(today(), 3), { type: "date" }) +
+        fText("requested_time", "Preferred time", presetHour !== undefined ? String(presetHour).padStart(2, "0") + ":00" : "16:00", { type: "time" }) +
       "</div>" +
       fArea("note", "Anything the centre should know", ""),
     onSave: async () => {
@@ -5185,6 +5330,87 @@ TUTOR.assessments = async function (view) {
 TUTOR.homework = ADMIN.homework;
 TUTOR.account = accountView;
 
+/* ------------------------------------------------------- MY AVAILABILITY --- */
+/* Families never see this directly — only the free/not-free count Book a
+   slot's calendar gets back from tutor_availability_grid(). */
+TUTOR.availability = async function (view) {
+  const [avail, timeOff] = await Promise.all([
+    sel("tutor_availability", q => q.eq("tutor_id", state.user.id).order("day_of_week")),
+    sel("tutor_time_off", q => q.eq("tutor_id", state.user.id).gte("off_date", today()).order("off_date")),
+  ]);
+
+  const availRows = avail.map(a =>
+    "<tr><td><b>" + esc(DOW[a.day_of_week]) + "</b></td><td>" + esc(fmtRange(a.start_time, a.end_time)) + "</td>" +
+    '<td class="act"><button class="btn btn-sm btn-danger" data-act="avail-remove" data-id="' + a.id + '">Remove</button></td></tr>');
+
+  const offRows = timeOff.map(o =>
+    "<tr><td><b>" + esc(fmtDate(o.off_date)) + "</b></td>" +
+    "<td>" + (o.start_time ? esc(fmtRange(o.start_time, o.end_time)) : "Whole day") + "</td>" +
+    "<td>" + esc(o.note || "") + "</td>" +
+    '<td class="act"><button class="btn btn-sm btn-danger" data-act="timeoff-remove" data-id="' + o.id + '">Remove</button></td></tr>');
+
+  view.innerHTML =
+    pageHead("My availability", "Families only ever see whether someone is free — never your schedule directly") +
+    card("Weekly pattern",
+      "<p class='hint' style='margin-bottom:12px'>When you're generally free to teach, week to week.</p>" +
+      '<button class="btn btn-mint" data-act="avail-add" style="margin-bottom:12px">Add availability</button>' +
+      (availRows.length ? table(["Day", "Hours", ""], availRows)
+        : emptyState("◷", "No weekly pattern set", "You won't show up as available for a custom time until you add one.")), "", true) +
+    card("Blocked off",
+      "<p class='hint' style='margin-bottom:12px'>One-off exceptions on top of your weekly pattern — a day off, an appointment.</p>" +
+      '<button class="btn btn-ghost" data-act="timeoff-add" style="margin-bottom:12px">Block off a time</button>' +
+      (offRows.length ? table(["Date", "Time", "Note", ""], offRows) : emptyState("✓", "Nothing blocked off", "")), "", true);
+};
+
+function availabilityForm() {
+  openModal({
+    title: "Add availability",
+    body:
+      fSelect("day_of_week", "Day", "1", DOW.map((d, i) => ({ value: i, label: d }))) +
+      '<div class="grid-2">' +
+        fText("start_time", "From", "15:00", { type: "time" }) +
+        fText("end_time", "To", "20:00", { type: "time" }) +
+      "</div>",
+    onSave: async () => {
+      const v = modalValues();
+      if (v.start_time >= v.end_time) return toast("End must be after start.", "bad");
+      try {
+        await ins("tutor_availability", {
+          tutor_id: state.user.id, day_of_week: Number(v.day_of_week),
+          start_time: v.start_time, end_time: v.end_time,
+        });
+        closeModal(); toast("Availability added.", "ok"); render();
+      } catch (e) { fail(e); }
+    },
+  });
+}
+
+function timeOffForm() {
+  openModal({
+    title: "Block off a time",
+    body:
+      fText("off_date", "Date", today(), { type: "date" }) +
+      fCheck("whole_day", "Whole day", true) +
+      '<div class="grid-2">' +
+        fText("start_time", "From", "09:00", { type: "time" }) +
+        fText("end_time", "To", "21:00", { type: "time" }) +
+      "</div>" +
+      fText("note", "Note (optional)", ""),
+    onSave: async () => {
+      const v = modalValues();
+      try {
+        await ins("tutor_time_off", {
+          tutor_id: state.user.id, off_date: v.off_date,
+          start_time: v.whole_day ? null : v.start_time,
+          end_time: v.whole_day ? null : v.end_time,
+          note: v.note,
+        });
+        closeModal(); toast("Blocked off.", "ok"); render();
+      } catch (e) { fail(e); }
+    },
+  });
+}
+
 /* --------------------------------------------------- PENDING TUTOR: waiting -- */
 const PENDING_TUTOR = {};
 PENDING_TUTOR.overview = async function (view) {
@@ -5206,6 +5432,7 @@ PENDING_TUTOR.account = accountView;
 ADMIN.teaching     = TUTOR.overview;
 ADMIN.myschedule   = TUTOR.schedule;
 ADMIN.myattendance = TUTOR.attendance;
+ADMIN.myavailability = TUTOR.availability;
 
 ADMIN.mystudents = async function (view) {
   const { ids: classIds } = await myClassIds();
@@ -5344,6 +5571,14 @@ const ACTIONS = {
       toast("Request declined.", "ok"); render();
     } catch (e) { fail(e); }
   },
+  "avail-add": () => availabilityForm(),
+  "avail-remove": async el => {
+    try { await del("tutor_availability", el.dataset.id); toast("Removed.", "ok"); render(); } catch (e) { fail(e); }
+  },
+  "timeoff-add": () => timeOffForm(),
+  "timeoff-remove": async el => {
+    try { await del("tutor_time_off", el.dataset.id); toast("Removed.", "ok"); render(); } catch (e) { fail(e); }
+  },
   "request-booking": async el => {
     const s = currentStudent();
     try {
@@ -5379,6 +5614,13 @@ const ACTIONS = {
     } catch (e) { fail(e); }
   },
   "lesson-request": () => lessonRequestForm(),
+  "calendar-request-lesson": el => lessonRequestForm(el.dataset.date, Number(el.dataset.hour)),
+  "book-week": el => {
+    const d = Number(el.dataset.d);
+    state.bookFrom = d === 0 ? today() : addDays(state.bookFrom, d);
+    if (state.bookFrom < today()) state.bookFrom = today();
+    render();
+  },
 
   /* ---- students -------------------------------------------------------- */
   "student-edit": el => { closeModal(); studentForm(el.dataset.id || null); },
