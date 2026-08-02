@@ -5078,8 +5078,8 @@ async function bookableView(view) {
         const eligible = eligibleFor(x, c, isOpenClass);
         const kidRows = eligible.map(k => {
           const b = takenMap[k.id + "_" + x.id];
-          if (b) return '<div><span class="pill ' + (b.status === "confirmed" ? "ok" : "warn") + '">' +
-            esc(k.full_name) + " · " + esc(b.status) + "</span></div>";
+          if (b) return '<div style="font-size:12px;margin-bottom:2px;line-height:1.4">' + esc(k.full_name) + ' <span class="pill ' +
+            (b.status === "confirmed" ? "ok" : "warn") + '">' + esc(b.status) + "</span></div>";
           const km = makeupByKid[k.id];
           return '<label class="check" style="display:block;font-size:12px">' +
             '<input type="checkbox" class="kid-book-box" data-session="' + x.id + '" data-kid="' + k.id +
