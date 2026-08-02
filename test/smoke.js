@@ -542,6 +542,18 @@ async function runRole(roleName, userId, empty) {
     }
     w.document.querySelector('[data-act="sched-view"][data-v="week"]').click();
     await new Promise(r => setTimeout(r, 80));
+
+    // --- attendance: not-marked pill, and a week view ---
+    w.location.hash = "#/attendance"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    let attTxt = w.document.querySelector("#view").textContent;
+    check("today's session shows Not marked yet before its register is taken", /Not marked yet/.test(attTxt));
+    w.document.querySelector('[data-act="att-view"][data-v="week"]').click();
+    await new Promise(r => setTimeout(r, 80));
+    attTxt = w.document.querySelector("#view").textContent;
+    check("week view shows a Date column", /Date/.test(w.document.querySelector("#view thead").textContent));
+    check("week view still lists today's session", /Sec 3 G3 A-Math/.test(attTxt));
+    w.document.querySelector('[data-act="att-view"][data-v="day"]').click();
+    await new Promise(r => setTimeout(r, 80));
   }
   if (roleName === "parent" && !empty) {
     w.location.hash = "#/book"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));

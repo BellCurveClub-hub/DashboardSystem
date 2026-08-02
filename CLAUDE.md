@@ -501,6 +501,24 @@ looking at roughly the same place instead of jumping.
   same, so a full year at once is mostly empty space and not something
   admins actually asked to see.
 
+**Attendance day/week view, and a not-marked indicator.** Same idea as
+Schedule but simpler — no month view was asked for, and the two roles'
+tables already had different columns, so `ADMIN.attendance`/
+`TUTOR.attendance` stayed separate rather than sharing one grid renderer.
+
+- `state.attView` (`"day"`/`"week"`) plus the existing `state.attDate`
+  drive both; `attendanceRange()`/`attendanceNavHTML()` are the small
+  shared pieces. The date field applies itself on change now (a delegated
+  `change` listener, same pattern `#f_progstudent` already used) — the
+  separate "Show" button is gone, and Previous/Next sit either side of
+  the date instead of both trailing it.
+- Every row gets an `attendanceTakenPill()` — "N marked" (green) or "Not
+  marked yet" (red), from a plain count of `attendance` rows for that
+  session. Deliberately not a full "done vs partial" check against the
+  roster (enrolments + bookings) — correct, but another couple of queries
+  per page load for a list that can show many sessions at once wasn't
+  worth it for a glance-able status pill.
+
 **Next, in order:**
 
 1. Term and holiday calendar — decided: a marked holiday blocks families from

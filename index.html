@@ -3012,7 +3012,34 @@ function weekStartOf(dstr) {
 state.scheduleView = "week";     // "day" | "week" | "month"
 state.scheduleAnchor = today();  // the date each view is built around
 state.attDate = today();
+state.attView = "day"; // "day" | "week"
 state.bookFrom = today();
+
+function attendanceRange(view, date) {
+  if (view === "week") { const from = weekStartOf(date); return { from, to: addDays(from, 6) }; }
+  return { from: date, to: date };
+}
+// nav row shared by ADMIN.attendance and TUTOR.attendance: a Day/Week
+// switcher plus Previous/date/Next around whichever is the live anchor
+function attendanceNavHTML(view, date) {
+  return '<div class="filters" style="align-items:center">' +
+    '<div class="tabs-seg" style="margin:0" role="tablist">' +
+      ["day", "week"].map(v => '<button role="tab" aria-selected="' + (view === v) + '" data-act="att-view" data-v="' + v +
+        '">' + v[0].toUpperCase() + v.slice(1) + "</button>").join("") + "</div>" +
+    '<button class="btn btn-ghost" data-act="att-shift" data-d="-1">‹ Previous</button>' +
+    fText("attdate", "", date, { type: "date" }) +
+    '<button class="btn btn-ghost" data-act="att-shift" data-d="1">Next ›</button>' +
+    "</div>";
+}
+// how many students have actually been marked for a session — a plain
+// count rather than a full "done/not done" check against the roster
+// (enrolments + bookings), which would need more queries than a list
+// view showing many sessions at once is worth
+function attendanceTakenPill(count) {
+  return count > 0
+    ? '<span class="pill ok">' + count + " marked</span>"
+    : '<span class="pill bad">Not marked yet</span>';
+}
 
 // the date window a schedule view needs data for, and its date range
 // query bounds — month needs the full 6-week grid, not just the month's
@@ -3482,30 +3509,35 @@ ADMIN.bookings = async function (view) {
 
 /* ----------------------------------------------------------- ATTENDANCE ---- */
 ADMIN.attendance = async function (view) {
-  const d = state.attDate;
+  const d = state.attDate, attView = state.attView;
+  const { from, to } = attendanceRange(attView, d);
   const [sessions, classesList, levels] = await Promise.all([
-    sel("sessions", q => q.eq("session_date", d).order("start_time")),
+    sel("sessions", q => q.gte("session_date", from).lte("session_date", to).order("session_date").order("start_time")),
     sel("classes"), sel("levels"),
   ]);
   const classes = byId(classesList), lvMap = byId(levels);
+  const sessionIds = sessions.map(s => s.id);
+  const att = sessionIds.length ? await sel("attendance", q => q.in("session_id", sessionIds)) : [];
+  const attCounts = {}; att.forEach(a => (attCounts[a.session_id] = (attCounts[a.session_id] || 0) + 1));
 
+  const headers = (attView === "week" ? ["Date"] : []).concat(["Time", "Class", "Level", "Tutor", "Register", ""]);
   const rows = sessions.map(s => {
     const c = classes[s.class_id] || {};
-    return "<tr><td><b>" + esc(fmtRange(s.start_time, s.end_time)) + "</b></td>" +
+    return "<tr>" + (attView === "week" ? "<td>" + esc(fmtDate(s.session_date)) + "</td>" : "") +
+      "<td><b>" + esc(fmtRange(s.start_time, s.end_time)) + "</b></td>" +
       "<td>" + esc(c.name || "—") + "</td><td>" + esc(nameOf(lvMap, c.level_id, "—")) + "</td>" +
       "<td>" + esc(s.tutor_name || c.tutor_name || "—") + "</td>" +
+      "<td>" + attendanceTakenPill(attCounts[s.id] || 0) + "</td>" +
       '<td class="act"><button class="btn btn-sm btn-mint" data-act="take-attendance" data-id="' + s.id + '">Mark the register</button></td></tr>';
   });
 
   view.innerHTML =
     pageHead("Attendance", "Marking a student present charges one lesson credit and awards points",
       '<button class="btn btn-ghost" data-act="export-attendance">Export to CSV</button>') +
-    '<div class="filters">' + fText("attdate", "Date", d, { type: "date" }) +
-      '<button class="btn btn-ghost" data-act="att-date">Show</button>' +
-      '<button class="btn btn-ghost" data-act="att-shift" data-d="-1">‹ Day</button>' +
-      '<button class="btn btn-ghost" data-act="att-shift" data-d="1">Day ›</button></div>' +
-    card(fmtDate(d), sessions.length ? table(["Time", "Class", "Level", "Tutor", ""], rows)
-      : emptyState("◷", "No lessons on this date", "Pick another day, or generate sessions on the Schedule page."), "", true);
+    attendanceNavHTML(attView, d) +
+    card(attView === "week" ? fmtDate(from) + " – " + fmtDate(to) : fmtDate(d),
+      sessions.length ? table(headers, rows)
+        : emptyState("◷", "No lessons on this date", "Pick another day, or generate sessions on the Schedule page."), "", true);
 };
 
 async function attendanceSheet(sessionId) {
@@ -5782,23 +5814,29 @@ TUTOR.schedule = async function (view) {
 
 /* ------------------------------------------------------------ ATTENDANCE -- */
 TUTOR.attendance = async function (view) {
-  const d = state.attDate;
+  const d = state.attDate, attView = state.attView;
+  const { from, to } = attendanceRange(attView, d);
   const { ids, map } = await myClassIds();
-  const sessions = mine(await sel("sessions", q => q.eq("session_date", d).order("start_time")), ids);
+  const sessions = mine(await sel("sessions", q => q.gte("session_date", from).lte("session_date", to).order("session_date").order("start_time")), ids);
+  const sessionIds = sessions.map(s => s.id);
+  const att = sessionIds.length ? await sel("attendance", q => q.in("session_id", sessionIds)) : [];
+  const attCounts = {}; att.forEach(a => (attCounts[a.session_id] = (attCounts[a.session_id] || 0) + 1));
+
+  const headers = (attView === "week" ? ["Date"] : []).concat(["Time", "Class", "Room", "Register", ""]);
 
   view.innerHTML =
     pageHead("Attendance", "Marking a student present uses one of their lesson credits") +
-    '<div class="filters">' + fText("attdate", "Date", d, { type: "date" }) +
-      '<button class="btn btn-ghost" data-act="att-date">Show</button>' +
-      '<button class="btn btn-ghost" data-act="att-shift" data-d="-1">‹ Day</button>' +
-      '<button class="btn btn-ghost" data-act="att-shift" data-d="1">Day ›</button></div>' +
-    card(fmtDate(d), sessions.length
-      ? table(["Time", "Class", "Room", ""], sessions.map(s =>
-          "<tr><td><b>" + esc(fmtRange(s.start_time, s.end_time)) + "</b></td>" +
-          "<td>" + esc(nameOf(map, s.class_id)) + "</td>" +
-          "<td>" + esc(s.room || "—") + "</td>" +
-          '<td class="act"><button class="btn btn-sm btn-mint" data-act="take-attendance" data-id="' + s.id + '">Mark the register</button></td></tr>'))
-      : emptyState("◷", "No lessons of yours on this date", "Pick another day."), "", true);
+    attendanceNavHTML(attView, d) +
+    card(attView === "week" ? fmtDate(from) + " – " + fmtDate(to) : fmtDate(d),
+      sessions.length
+        ? table(headers, sessions.map(s =>
+            "<tr>" + (attView === "week" ? "<td>" + esc(fmtDate(s.session_date)) + "</td>" : "") +
+            "<td><b>" + esc(fmtRange(s.start_time, s.end_time)) + "</b></td>" +
+            "<td>" + esc(nameOf(map, s.class_id)) + "</td>" +
+            "<td>" + esc(s.room || "—") + "</td>" +
+            "<td>" + attendanceTakenPill(attCounts[s.id] || 0) + "</td>" +
+            '<td class="act"><button class="btn btn-sm btn-mint" data-act="take-attendance" data-id="' + s.id + '">Mark the register</button></td></tr>'))
+        : emptyState("◷", "No lessons of yours on this date", "Pick another day."), "", true);
 };
 
 /* ------------------------------------------------------------- STUDENTS --- */
@@ -6120,8 +6158,12 @@ const ACTIONS = {
     const covered = new Set($$('[data-act="toggle-topic-covered"][aria-selected="true"]').map(x => x.dataset.topic));
     holder.innerHTML = host.__renderTopicGrid(covered);
   },
-  "att-date": () => { state.attDate = $("#f_attdate").value || today(); render(); },
-  "att-shift": el => { state.attDate = addDays(state.attDate, Number(el.dataset.d)); render(); },
+  "att-view": el => { state.attView = el.dataset.v; render(); },
+  "att-shift": el => {
+    const step = state.attView === "week" ? Number(el.dataset.d) * 7 : Number(el.dataset.d);
+    state.attDate = addDays(state.attDate, step);
+    render();
+  },
 
   /* ---- bookings -------------------------------------------------------- */
   "booking-set": async el => {
@@ -6512,6 +6554,7 @@ document.addEventListener("keypress", ev => {
 
 document.addEventListener("change", ev => {
   if (ev.target.id === "f_progstudent") { state.progressStudent = ev.target.value; render(); }
+  if (ev.target.id === "f_attdate" && ev.target.value) { state.attDate = ev.target.value; render(); }
 });
 
 window.addEventListener("hashchange", () => render());
