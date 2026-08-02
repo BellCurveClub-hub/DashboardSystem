@@ -3363,13 +3363,21 @@ async function overviewAttentionTab() {
   ]);
   const pmap = byId(parents), smap = byId(students);
   const lowCredit = students.filter(s => Number(s.credits) <= Number(s.low_credit_at));
-  const overdue = invoices.filter(i => i.due_at && i.due_at < today());
+  const isOverdue = i => !!(i.due_at && i.due_at < today());
+  const overdue = invoices.filter(isOverdue);
+  // every unpaid invoice belongs here, not just overdue ones — overdue
+  // just sorts first, since that's the more urgent case
+  const awaiting = invoices.slice().sort((a, b) => {
+    const ao = isOverdue(a), bo = isOverdue(b);
+    if (ao !== bo) return ao ? -1 : 1;
+    return (a.due_at || "").localeCompare(b.due_at || "");
+  });
 
   const stats =
     '<div class="cols cols-4" style="margin-bottom:18px">' +
       '<div class="stat' + (bookings.length ? " alert" : "") + '"><div class="k">Booking requests</div><div class="v">' + bookings.length + '</div><div class="n">waiting for a decision</div></div>' +
       '<div class="stat' + (redemptions.length ? " alert" : "") + '"><div class="k">Redemptions</div><div class="v">' + redemptions.length + '</div><div class="n">gifts to hand out</div></div>' +
-      '<div class="stat' + (overdue.length ? " alert" : "") + '"><div class="k">Overdue invoices</div><div class="v">' + overdue.length + '</div><div class="n">past due date</div></div>' +
+      '<div class="stat' + (overdue.length ? " alert" : "") + '"><div class="k">Overdue invoices</div><div class="v">' + overdue.length + '</div><div class="n">of ' + awaiting.length + " awaiting payment</div></div>" +
       '<div class="stat' + (lowCredit.length ? " alert" : "") + '"><div class="k">Running low</div><div class="v">' + lowCredit.length + '</div><div class="n">students near zero credits</div></div>' +
     "</div>";
 
@@ -3384,11 +3392,15 @@ async function overviewAttentionTab() {
     "<p class='hint' style='margin-bottom:0'>Parent: " + esc(pmap[s.parent_id] ? pmap[s.parent_id].full_name : "not linked") + "</p>" +
       contactLinksHTML(pmap[s.parent_id], sendEmailButtonHTML("low-credit", s.id, "Send credit alert")))).join("");
 
-  const overdueRows = overdue.map(i => expandRowHTML("ov-" + i.id,
-    "<span>" + esc(nameOf(smap, i.student_id)) + "</span><span class='pill bad'>" + money(i.amount_cents) + " · due " + esc(fmtDate(i.due_at)) + "</span>",
-    "<p class='hint' style='margin-bottom:0'>Invoice " + esc(i.invoice_no) + " · Parent: " +
-      esc(pmap[i.parent_id] ? pmap[i.parent_id].full_name : "not linked") + "</p>" +
-      contactLinksHTML(pmap[i.parent_id], sendEmailButtonHTML("reminder", i.id, "Send reminder")))).join("");
+  const awaitingRows = awaiting.map(i => {
+    const over = isOverdue(i);
+    return expandRowHTML("ov-" + i.id,
+      "<span>" + esc(nameOf(smap, i.student_id)) + "</span><span class='pill " + (over ? "bad" : "warn") + "'>" +
+        money(i.amount_cents) + " · " + (over ? "overdue" : "due") + " " + esc(fmtDate(i.due_at)) + "</span>",
+      "<p class='hint' style='margin-bottom:0'>Invoice " + esc(i.invoice_no) + " · Parent: " +
+        esc(pmap[i.parent_id] ? pmap[i.parent_id].full_name : "not linked") + "</p>" +
+        contactLinksHTML(pmap[i.parent_id], sendEmailButtonHTML(over ? "reminder" : "invoice", i.id, over ? "Send reminder" : "Send invoice")));
+  }).join("");
 
   return stats +
     (Number(state.settings.notifications_email) !== 1
@@ -3396,8 +3408,8 @@ async function overviewAttentionTab() {
     (waiting.length ? card("Waiting on you", "<ul style='margin:0;padding-left:18px;line-height:1.9'>" + waiting.join("") + "</ul>", "", true) : "") +
     card("Running low on credits (" + lowCredit.length + ")",
       lowCreditRows || emptyState("✓", "Nobody's low", "Every active student has enough credits."), "", true) +
-    card("Awaiting payment, overdue (" + overdue.length + ")",
-      overdueRows || emptyState("✓", "Nothing overdue", "No invoice is past its due date."), "", true) +
+    card("Awaiting payment (" + awaiting.length + (overdue.length ? " · " + overdue.length + " overdue" : "") + ")",
+      awaitingRows || emptyState("✓", "Nothing outstanding", "Every invoice has been paid."), "", true) +
     card("Recent actions", await recentActionsHTML(smap), "", true);
 }
 

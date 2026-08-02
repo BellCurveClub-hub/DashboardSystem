@@ -116,6 +116,11 @@ function fixtures() {
       { id: "in2", invoice_no: "INV-2026-1001", student_id: "st2", parent_id: UID.parent, package_id: "pk1",
         description: "8-lesson Maths package", lessons: 8, amount_cents: 48000, status: "paid", issued_at: plus(-40),
         due_at: plus(-33), paid_at: new Date().toISOString(), payment_ref: "x", hitpay_request_id: null, hitpay_url: "https://pay/x" },
+      // awaiting payment, but not overdue yet — should still show on
+      // Overview's Needs Attention tab, just sorted after the overdue one
+      { id: "in3", invoice_no: "INV-2026-1002", student_id: "st1", parent_id: UID.parent, package_id: "pk1",
+        description: "8-lesson Maths package", lessons: 8, amount_cents: 48000, status: "sent", issued_at: plus(-1),
+        due_at: plus(5), paid_at: null, payment_ref: null, hitpay_request_id: null, hitpay_url: null },
     ],
     credit_ledger: [{ id: "cl_1", student_id: "st1", delta: 8, reason: "Package paid", ref_table: "invoices", ref_id: "in1", created_at: new Date().toISOString() }],
     points_ledger: [{ id: "pl1", student_id: "st1", delta: 10, reason: "Attended a lesson", ref_table: "attendance", ref_id: "at1", created_at: new Date().toISOString() }],
@@ -345,6 +350,8 @@ async function runRole(roleName, userId, empty) {
     w.location.hash = "#/overview"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
     const ovTxt = w.document.querySelector("#view").textContent;
     check("attention tab is the default", /Needs attention/.test(ovTxt) && /Running low on credits/.test(ovTxt));
+    check("awaiting payment shows an overdue invoice and one not yet due", /INV-2026-1000/.test(ovTxt) && /INV-2026-1002/.test(ovTxt));
+    check("awaiting payment card title counts both, flags the overdue one", /Awaiting payment \(2 · 1 overdue\)/.test(ovTxt));
     const lcToggle = w.document.querySelector('[data-act="toggle-attn"]');
     check("a low-credit row is collapsed by default", !!lcToggle && lcToggle.getAttribute("aria-expanded") === "false");
     if (lcToggle) {
@@ -472,8 +479,7 @@ async function runRole(roleName, userId, empty) {
     // the paid invoice must come out as a receipt
     w.document.querySelector('[data-act="close-print"]').click();
     await new Promise(r => setTimeout(r, 40));
-    const paidBtns = Array.from(w.document.querySelectorAll('[data-act="print-invoice"]'));
-    paidBtns[paidBtns.length - 1].click();
+    w.document.querySelector('[data-act="print-invoice"][data-id="in2"]').click();
     await new Promise(r => setTimeout(r, 150));
     const rec = w.document.querySelector("#printdoc").textContent;
     check("paid invoice prints as a receipt", /Receipt/.test(rec) && /Payment received/.test(rec));

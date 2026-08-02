@@ -552,6 +552,14 @@ up front.
   `expandRowHTML()` accordion rows (click to expand — a plain DOM toggle
   via `toggle-attn`, not a `render()` round-trip, since nothing about the
   data changes) rather than a flat text list.
+- The "Awaiting payment" card lists every unpaid (`status = 'sent'`)
+  invoice, not only overdue ones — an invoice not yet due is still
+  something worth seeing, it just sorts after the overdue ones (a red
+  pill vs an amber one marks which is which). The original version only
+  ever showed overdue invoices, which is what prompted this — a payment
+  someone was legitimately waiting on just didn't appear yet. The
+  send-email kind on each row follows: `"reminder"` once overdue,
+  `"invoice"` before then, matching the two templates that already existed.
 - Expanding a row reveals `contactLinksHTML()` — `mailto:`/`tel:`/`sms:`
   links built from the parent profile's existing email/phone. No
   messaging system or configured email/SMS sender exists yet (both
