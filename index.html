@@ -3331,11 +3331,10 @@ function contactLinksHTML(parent, sendBtnHTML) {
   if (!parent) return "<p class='hint'>No parent account linked.</p>";
   const links = [];
   if (sendBtnHTML) links.push(sendBtnHTML);
-  if (parent.email) links.push('<a class="btn btn-sm btn-ghost" href="mailto:' + esc(parent.email) + '">Email</a>');
   if (parent.phone) links.push('<a class="btn btn-sm btn-ghost" href="tel:' + esc(parent.phone) + '">Call</a>');
   if (parent.phone) links.push('<a class="btn btn-sm btn-ghost" href="sms:' + esc(parent.phone) + '">Message</a>');
   return '<div class="btn-row" style="margin-top:8px">' +
-    (links.length ? links.join("") : "<span class='hint'>No email or phone on file.</span>") + "</div>";
+    (links.length ? links.join("") : "<span class='hint'>No phone on file, and email sending is off.</span>") + "</div>";
 }
 // only rendered once notifications_email is switched on (Settings) — the
 // notify function has to actually be deployed and configured first

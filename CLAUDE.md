@@ -176,7 +176,7 @@ gained the same day/week idea plus a not-marked-yet indicator (see
 below) · the sidebar keeps its scroll position across navigation (see
 below) · the admin Overview is split into Needs attention (default),
 Financial and Today's lessons tabs, with expandable low-credit/overdue
-rows offering mailto/tel/sms contact links and a recent-actions feed
+rows offering tel/sms contact links and a recent-actions feed
 (see below) · a second Edge Function sends invoice, reminder and
 low-credit email through Brevo, manual-trigger only (see below).
 
@@ -560,14 +560,14 @@ up front.
   someone was legitimately waiting on just didn't appear yet. The
   send-email kind on each row follows: `"reminder"` once overdue,
   `"invoice"` before then, matching the two templates that already existed.
-- Expanding a row reveals `contactLinksHTML()` — `mailto:`/`tel:`/`sms:`
-  links built from the parent profile's existing email/phone. No
-  messaging system or configured email/SMS sender exists yet (both
-  already deferred elsewhere in this project), so these are plain
-  protocol links against data already on file, not an actual send — the
-  most that's honestly true to build today. An automated "you're low on
-  credits" email was asked for too, but explicitly held for later,
-  matching the existing deferred-email decision below.
+- Expanding a row reveals `contactLinksHTML()` — `tel:`/`sms:` links built
+  from the parent profile's phone, plus the `sendEmailButtonHTML()` Send
+  button described below. A `mailto:` link sat here too at first, but it
+  hands off to whatever the visitor's OS has set as its default mail
+  app — on a desktop with no mail client actually configured that's a
+  jarring, useless popup, and Send (an actual delivered email, not just
+  a compose window) makes it redundant now anyway. Removed rather than
+  worked around.
 - **Recent actions** (on the attention tab) unions recent rows already
   sitting in `credit_ledger`, `points_ledger`, `invoices`, `bookings`,
   `redemptions`, `attendance` and `absence_reports` by timestamp — no new
@@ -605,7 +605,8 @@ yet — see the deferred list below.
   escalation.
 - Send buttons live where the *decision* to send already happens: the
   low-credit and overdue-invoice rows on Overview's Needs Attention tab
-  (next to the existing mailto/tel/sms links), and the Financial tab's
+  (next to the existing tel/sms links — mailto was dropped, see above),
+  and the Financial tab's
   recent-invoices table for a freshly issued (`status = 'sent'`) invoice.
   Not on paid or void invoices — there's nothing to remind about.
 - Building the actual HTML email templates required knowing Brevo's exact
