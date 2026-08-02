@@ -2438,6 +2438,16 @@ function json(body, status) {
 function money(cents) { return "$" + (cents / 100).toFixed(2); }
 
 async function sendEmail(to, toName, subject, html) {
+  // logged so Supabase's function logs actually show what happened --
+  // never the key itself, just whether one is present, plus Brevo's real
+  // response either way. If BREVO_KEY or SENDER_EMAIL is missing this
+  // logs it plainly instead of leaving a confusing 401 to decode.
+  console.log("notify: sending via Brevo", {
+    to: to, hasKey: !!BREVO_KEY, keyLength: BREVO_KEY.length, sender: SENDER_EMAIL || "(not set)",
+  });
+  if (!BREVO_KEY || !SENDER_EMAIL) {
+    throw new Error("BREVO_API_KEY or BREVO_SENDER_EMAIL is not set on this function -- check Supabase secrets.");
+  }
   const res = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "Content-Type": "application/json", "api-key": BREVO_KEY },
@@ -2449,6 +2459,7 @@ async function sendEmail(to, toName, subject, html) {
     }),
   });
   const data = await res.json().catch(function () { return null; });
+  console.log("notify: Brevo responded", { status: res.status, ok: res.ok, body: data });
   if (!res.ok) throw new Error((data && (data.message || JSON.stringify(data))) || "Brevo refused the request.");
   return data;
 }
