@@ -2884,6 +2884,13 @@ function renderNoProfile() {
 
 /* ------------------------------------------------------------------- shell -- */
 function renderShell(inner) {
+  // every render() rebuilds the whole shell from scratch (innerHTML, no
+  // diffing) — including the sidebar, which loses its scroll position
+  // each time otherwise. On a long nav list that meant clicking an item
+  // near the bottom, then wanting the next one down, snapped back to the
+  // top of the list on every single navigation.
+  const oldNav = $(".side-nav");
+  const navScroll = oldNav ? oldNav.scrollTop : 0;
   const items = NAV[state.role] || [];
   const cur = state.route;
   const nav = items.map(n => {
@@ -2918,6 +2925,8 @@ function renderShell(inner) {
         '<main class="view" id="view">' + inner + "</main>" +
       "</div>" +
     "</div>";
+  const newNav = $(".side-nav");
+  if (newNav) newNav.scrollTop = navScroll;
 }
 
 function currentStudent() {

@@ -519,6 +519,17 @@ tables already had different columns, so `ADMIN.attendance`/
   per page load for a list that can show many sessions at once wasn't
   worth it for a glance-able status pill.
 
+**Sidebar keeps its scroll position across navigation.** `renderShell()`
+rebuilds the whole shell from scratch on every `render()` — no DOM
+diffing anywhere in this app — which meant the sidebar's own scroll reset
+to the top every time too. On the admin nav (~800px of overflow on a
+normal laptop screen — measured, not guessed) that made clicking a nav
+item near the bottom, then wanting the next one down, force a re-scroll
+every single time. `renderShell()` now reads `.side-nav`'s `scrollTop`
+before replacing `#root`'s `innerHTML` and restores it after — the
+smallest fix that fits the app's existing rebuild-everything style,
+rather than introducing partial DOM updates just for this.
+
 **Next, in order:**
 
 1. Term and holiday calendar — decided: a marked holiday blocks families from
