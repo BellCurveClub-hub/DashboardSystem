@@ -171,7 +171,13 @@ levels and streams are admin-managed reference data, not free text, and
 gate fixed-class drop-in eligibility together with subject (see below) ·
 a considered rule stops a new slot leaving a tutor an awkward gap (see
 below) · Schedule (admin and tutor) switches between day, week and
-month views around one shared anchor date (see below).
+month views around one shared anchor date (see below) · Attendance
+gained the same day/week idea plus a not-marked-yet indicator (see
+below) · the sidebar keeps its scroll position across navigation (see
+below) · the admin Overview is split into Needs attention (default),
+Financial and Today's lessons tabs, with expandable low-credit/overdue
+rows offering mailto/tel/sms contact links and a recent-actions feed
+(see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -529,6 +535,44 @@ every single time. `renderShell()` now reads `.side-nav`'s `scrollTop`
 before replacing `#root`'s `innerHTML` and restores it after — the
 smallest fix that fits the app's existing rebuild-everything style,
 rather than introducing partial DOM updates just for this.
+
+**Admin Overview, split into tabs.** It used to be one dense page — four
+stat tiles, a "Today's lessons" table, and a "Needs your attention" list
+that just flattened booking requests, redemptions, overdue invoices and
+low-credit names into plain `<li>` text with no links or actions. Now
+three tabs, `state.overviewTab` (`"attention"`/`"financial"`/`"today"`),
+each fetching only what it needs rather than one page loading everything
+up front.
+
+- **Needs attention** is the default tab — deliberately, since it's the
+  urgent one, even though it's technically a tab like the other two.
+  Booking requests, redemptions, overdue invoices and low-credit count as
+  stat tiles up top; low-credit students and overdue invoices are now
+  `expandRowHTML()` accordion rows (click to expand — a plain DOM toggle
+  via `toggle-attn`, not a `render()` round-trip, since nothing about the
+  data changes) rather than a flat text list.
+- Expanding a row reveals `contactLinksHTML()` — `mailto:`/`tel:`/`sms:`
+  links built from the parent profile's existing email/phone. No
+  messaging system or configured email/SMS sender exists yet (both
+  already deferred elsewhere in this project), so these are plain
+  protocol links against data already on file, not an actual send — the
+  most that's honestly true to build today. An automated "you're low on
+  credits" email was asked for too, but explicitly held for later,
+  matching the existing deferred-email decision below.
+- **Recent actions** (on the attention tab) unions recent rows already
+  sitting in `credit_ledger`, `points_ledger`, `invoices`, `bookings`,
+  `redemptions`, `attendance` and `absence_reports` by timestamp — no new
+  audit table. Good enough to see "what just happened"; a dedicated audit
+  log is a bigger step worth taking only if this turns out not to be
+  enough.
+- **Financial** is revenue this month, outstanding balance, active
+  students, average credits held, plus a recent-invoices table — separate
+  from Needs Attention because it's reference info you check, not
+  something demanding action.
+- **Today's lessons** carries over the original today-table, plus a
+  "registers taken" stat reusing `attendanceTakenPill()` from the
+  Attendance page rather than inventing a second way to say the same
+  thing.
 
 **Next, in order:**
 

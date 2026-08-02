@@ -341,6 +341,27 @@ async function runRole(roleName, userId, empty) {
   const check = (name, cond, extra) => checks.push((cond ? "  ok   " : "  FAIL ") + name + (extra ? " :: " + extra : ""));
 
   if (roleName === "admin" && !empty) {
+    // --- overview: tabs, expandable rows with contact links, financial/today tabs ---
+    w.location.hash = "#/overview"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    const ovTxt = w.document.querySelector("#view").textContent;
+    check("attention tab is the default", /Needs attention/.test(ovTxt) && /Running low on credits/.test(ovTxt));
+    const lcToggle = w.document.querySelector('[data-act="toggle-attn"]');
+    check("a low-credit row is collapsed by default", !!lcToggle && lcToggle.getAttribute("aria-expanded") === "false");
+    if (lcToggle) {
+      lcToggle.click();
+      await new Promise(r => setTimeout(r, 60));
+      check("expanding a row reveals contact links", lcToggle.getAttribute("aria-expanded") === "true" &&
+        !!w.document.querySelector('a[href^="mailto:"], a[href^="tel:"]'));
+    }
+    w.document.querySelector('[data-act="overview-tab"][data-v="financial"]').click();
+    await new Promise(r => setTimeout(r, 80));
+    check("financial tab shows a revenue stat", /Revenue this month/.test(w.document.querySelector("#view").textContent));
+    w.document.querySelector('[data-act="overview-tab"][data-v="today"]').click();
+    await new Promise(r => setTimeout(r, 80));
+    check("today tab shows today's lessons", /Registers taken/.test(w.document.querySelector("#view").textContent));
+    w.document.querySelector('[data-act="overview-tab"][data-v="attention"]').click();
+    await new Promise(r => setTimeout(r, 80));
+
     w.location.hash = "#/students"; await w.eval("render()"); await new Promise(r => setTimeout(r, 60));
     await tryClick('[data-act="student-open"]');
     await tryClick('[data-act="student-edit"]');

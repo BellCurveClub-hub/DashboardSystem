@@ -307,6 +307,21 @@ table.tbl tr[draggable="true"]:active .drag-handle{cursor:grabbing}
 .pill.ink{background:#E5E8F1; color:var(--ink-700); border-color:#CCD2E2}
 
 /* ============================================================
+   EXPANDABLE ROW (dashboard "needs attention" lists)
+   ============================================================ */
+.attn-row{border-bottom:1px solid #F1ECE1}
+.attn-row:last-child{border-bottom:0}
+.attn-row-head{
+  width:100%; display:flex; align-items:center; gap:10px;
+  padding:11px 4px; border:0; background:transparent; cursor:pointer; text-align:left; font-size:14px;
+}
+.attn-row-head:hover{background:var(--cream)}
+.attn-row-summary{flex:1; display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:0}
+.attn-row-head .attn-chevron{color:var(--ink-faint); transition:transform .15s; flex:0 0 auto}
+.attn-row-head[aria-expanded="true"] .attn-chevron{transform:rotate(90deg)}
+.attn-row-body{padding:0 4px 12px}
+
+/* ============================================================
    SCHEDULE
    ============================================================ */
 .week-grid{display:grid; grid-template-columns:repeat(7,minmax(128px,1fr)); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:var(--r); overflow:hidden}
@@ -3022,6 +3037,7 @@ state.scheduleView = "week";     // "day" | "week" | "month"
 state.scheduleAnchor = today();  // the date each view is built around
 state.attDate = today();
 state.attView = "day"; // "day" | "week"
+state.overviewTab = "attention"; // "attention" | "financial" | "today"
 state.bookFrom = today();
 
 function attendanceRange(view, date) {
@@ -3146,64 +3162,194 @@ function scheduleViewSwitcher() {
 
 /* ------------------------------------------------------------- OVERVIEW ---- */
 ADMIN.overview = async function (view) {
-  const [students, sessions, invoices, bookings, redemptions] = await Promise.all([
-    sel("students", q => q.eq("is_active", true).order("full_name")),
-    sel("sessions", q => q.gte("session_date", today()).lte("session_date", addDays(today(), 6)).order("session_date").order("start_time")),
-    sel("invoices", q => q.in("status", ["sent", "draft"]).order("due_at")),
-    sel("bookings", q => q.eq("status", "requested")),
-    sel("redemptions", q => q.eq("status", "pending")),
-  ]);
-  const classes = byId(await sel("classes"));
-  const smap = byId(students);
+  const tab = state.overviewTab;
+  const body = tab === "financial" ? await overviewFinancialTab()
+    : tab === "today" ? await overviewTodayTab()
+    : await overviewAttentionTab();
 
-  const todays = sessions.filter(s => s.session_date === today() && s.status !== "cancelled");
-  const lowCredit = students.filter(s => Number(s.credits) <= Number(s.low_credit_at));
-  const overdue = invoices.filter(i => i.status === "sent" && i.due_at && i.due_at < today());
-  const owed = invoices.reduce((a, i) => a + (i.status === "sent" ? i.amount_cents : 0), 0);
-
-  const stats =
-    '<div class="cols cols-4" style="margin-bottom:18px">' +
-      '<div class="stat"><div class="k">Active students</div><div class="v">' + students.length + '</div><div class="n">on the roll today</div></div>' +
-      '<div class="stat"><div class="k">Lessons today</div><div class="v">' + todays.length + '</div><div class="n">' + esc(fmtDate(today())) + '</div></div>' +
-      '<div class="stat' + (owed ? " alert" : "") + '"><div class="k">Awaiting payment</div><div class="v">' + money(owed) + '</div><div class="n">' + overdue.length + " overdue</div></div>" +
-      '<div class="stat' + (lowCredit.length ? " alert" : "") + '"><div class="k">Running low</div><div class="v">' + lowCredit.length + '</div><div class="n">students near zero credits</div></div>' +
+  const tabsHTML = '<div class="tabs-seg" role="tablist" style="margin-bottom:18px">' +
+    [["attention", "Needs attention"], ["financial", "Financial"], ["today", "Today's lessons"]].map(([v, label]) =>
+      '<button role="tab" aria-selected="' + (tab === v) + '" data-act="overview-tab" data-v="' + v + '">' + esc(label) + "</button>").join("") +
     "</div>";
-
-  const todayRows = todays.map(s => {
-    const c = classes[s.class_id] || {};
-    return "<tr><td><b>" + esc(fmtRange(s.start_time, s.end_time)) + "</b></td>" +
-      "<td>" + esc(c.name || "—") + (s.is_bookable ? ' <span class="pill hl">open slot</span>' : "") + "</td>" +
-      "<td>" + esc(s.tutor_name || c.tutor_name || "—") + "</td>" +
-      "<td>" + esc(s.room || c.room || "—") + "</td>" +
-      '<td class="act"><button class="btn btn-sm btn-mint" data-act="take-attendance" data-id="' + s.id + '">Take attendance</button></td></tr>';
-  });
-
-  const actions = [];
-  if (bookings.length) actions.push('<li>' + bookings.length + ' booking request' + (bookings.length > 1 ? "s" : "") +
-    ' waiting — <a href="#/bookings">review</a></li>');
-  if (redemptions.length) actions.push('<li>' + redemptions.length + ' gift redemption' + (redemptions.length > 1 ? "s" : "") +
-    ' to hand out — <a href="#/redemptions">review</a></li>');
-  if (overdue.length) actions.push("<li>" + overdue.length + ' invoice' + (overdue.length > 1 ? "s are" : " is") +
-    ' past its due date — <a href="#/billing">chase</a></li>');
-  lowCredit.slice(0, 6).forEach(s => actions.push("<li>" + esc(s.full_name) + " has " + s.credits + " credit" +
-    (Number(s.credits) === 1 ? "" : "s") + " left</li>"));
 
   view.innerHTML =
     pageHead("Overview", fmtDate(today()) + " · " + DOW[new Date().getDay()],
       '<button class="btn btn-ghost" data-act="nav" data-route="schedule">Open the schedule</button>' +
       '<button class="btn btn-primary" data-act="new-invoice">New invoice</button>') +
-    stats +
-    '<div class="cols cols-2">' +
-      card("Today's lessons",
-        todays.length
-          ? table(["Time", "Class", "Tutor", "Room", { t: "" }], todayRows)
-          : emptyState("◷", "Nothing scheduled today", "Generate sessions from the weekly timetable on the Schedule page."),
-        "", true) +
-      card("Needs your attention",
-        actions.length ? "<ul style='margin:0;padding-left:18px;line-height:1.9'>" + actions.join("") + "</ul>"
-                       : emptyState("✓", "All clear", "No requests, no overdue invoices, nobody out of credits.")) +
-    "</div>";
+    tabsHTML + body;
 };
+
+// a mailto:/tel:/sms: row for whichever parent profile a Needs-attention
+// row is about — no messaging system or configured email/SMS sender
+// exists yet (both deferred elsewhere in this project), so these are
+// plain protocol links against the contact details already on file,
+// not a real send — the fastest thing that's actually true today
+function contactLinksHTML(parent) {
+  if (!parent) return "<p class='hint'>No parent account linked.</p>";
+  const links = [];
+  if (parent.email) links.push('<a class="btn btn-sm btn-ghost" href="mailto:' + esc(parent.email) + '">Email</a>');
+  if (parent.phone) links.push('<a class="btn btn-sm btn-ghost" href="tel:' + esc(parent.phone) + '">Call</a>');
+  if (parent.phone) links.push('<a class="btn btn-sm btn-ghost" href="sms:' + esc(parent.phone) + '">Message</a>');
+  return '<div class="btn-row" style="margin-top:8px">' +
+    (links.length ? links.join("") : "<span class='hint'>No email or phone on file.</span>") + "</div>";
+}
+// a click-to-expand row — used for the low-credit and overdue-payment
+// lists, which can otherwise run long once a centre has a real roll
+function expandRowHTML(id, headHTML, bodyHTML) {
+  return '<div class="attn-row">' +
+    '<button class="attn-row-head" type="button" data-act="toggle-attn" aria-expanded="false" data-id="attn-' + esc(id) + '">' +
+      '<span class="attn-row-summary">' + headHTML + '</span><span class="attn-chevron" aria-hidden="true">›</span></button>' +
+    '<div class="attn-row-body" id="attn-' + esc(id) + '" hidden>' + bodyHTML + "</div>" +
+  "</div>";
+}
+
+async function overviewAttentionTab() {
+  const [students, invoices, bookings, redemptions, parents] = await Promise.all([
+    sel("students", q => q.eq("is_active", true).order("full_name")),
+    sel("invoices", q => q.eq("status", "sent").order("due_at")),
+    sel("bookings", q => q.eq("status", "requested")),
+    sel("redemptions", q => q.eq("status", "pending")),
+    sel("profiles", q => q.eq("role", "parent")),
+  ]);
+  const pmap = byId(parents), smap = byId(students);
+  const lowCredit = students.filter(s => Number(s.credits) <= Number(s.low_credit_at));
+  const overdue = invoices.filter(i => i.due_at && i.due_at < today());
+
+  const stats =
+    '<div class="cols cols-4" style="margin-bottom:18px">' +
+      '<div class="stat' + (bookings.length ? " alert" : "") + '"><div class="k">Booking requests</div><div class="v">' + bookings.length + '</div><div class="n">waiting for a decision</div></div>' +
+      '<div class="stat' + (redemptions.length ? " alert" : "") + '"><div class="k">Redemptions</div><div class="v">' + redemptions.length + '</div><div class="n">gifts to hand out</div></div>' +
+      '<div class="stat' + (overdue.length ? " alert" : "") + '"><div class="k">Overdue invoices</div><div class="v">' + overdue.length + '</div><div class="n">past due date</div></div>' +
+      '<div class="stat' + (lowCredit.length ? " alert" : "") + '"><div class="k">Running low</div><div class="v">' + lowCredit.length + '</div><div class="n">students near zero credits</div></div>' +
+    "</div>";
+
+  const waiting = [];
+  if (bookings.length) waiting.push('<li>' + bookings.length + ' booking request' + (bookings.length > 1 ? "s" : "") +
+    ' waiting — <a href="#/bookings">review</a></li>');
+  if (redemptions.length) waiting.push('<li>' + redemptions.length + ' gift redemption' + (redemptions.length > 1 ? "s" : "") +
+    ' to hand out — <a href="#/redemptions">review</a></li>');
+
+  const lowCreditRows = lowCredit.map(s => expandRowHTML("lc-" + s.id,
+    "<span>" + esc(s.full_name) + "</span><span class='pill bad'>" + s.credits + " credit" + (Number(s.credits) === 1 ? "" : "s") + " left</span>",
+    "<p class='hint' style='margin-bottom:0'>Parent: " + esc(pmap[s.parent_id] ? pmap[s.parent_id].full_name : "not linked") + "</p>" +
+      contactLinksHTML(pmap[s.parent_id]))).join("");
+
+  const overdueRows = overdue.map(i => expandRowHTML("ov-" + i.id,
+    "<span>" + esc(nameOf(smap, i.student_id)) + "</span><span class='pill bad'>" + money(i.amount_cents) + " · due " + esc(fmtDate(i.due_at)) + "</span>",
+    "<p class='hint' style='margin-bottom:0'>Invoice " + esc(i.invoice_no) + " · Parent: " +
+      esc(pmap[i.parent_id] ? pmap[i.parent_id].full_name : "not linked") + "</p>" + contactLinksHTML(pmap[i.parent_id]))).join("");
+
+  return stats +
+    (waiting.length ? card("Waiting on you", "<ul style='margin:0;padding-left:18px;line-height:1.9'>" + waiting.join("") + "</ul>", "", true) : "") +
+    card("Running low on credits (" + lowCredit.length + ")",
+      lowCreditRows || emptyState("✓", "Nobody's low", "Every active student has enough credits."), "", true) +
+    card("Awaiting payment, overdue (" + overdue.length + ")",
+      overdueRows || emptyState("✓", "Nothing overdue", "No invoice is past its due date."), "", true) +
+    card("Recent actions", await recentActionsHTML(smap), "", true);
+}
+
+// a plain, no-schema-change activity feed — unions recent rows already
+// sitting in a handful of tables by timestamp, rather than a dedicated
+// audit log. Good enough to see "what just happened"; a real audit table
+// is a bigger step to take only if this turns out not to be enough
+async function recentActionsHTML(smap) {
+  const [credits, points, invoices, bookings, redemptions, attendance, reports, rewards, classesAll] = await Promise.all([
+    sel("credit_ledger", q => q.order("created_at", { ascending: false }).limit(15)),
+    sel("points_ledger", q => q.order("created_at", { ascending: false }).limit(15)),
+    sel("invoices", q => q.order("issued_at", { ascending: false }).limit(15)),
+    sel("bookings", q => q.order("created_at", { ascending: false }).limit(15)),
+    sel("redemptions", q => q.order("requested_at", { ascending: false }).limit(15)),
+    sel("attendance", q => q.order("marked_at", { ascending: false }).limit(15)),
+    sel("absence_reports", q => q.order("reported_at", { ascending: false }).limit(15)),
+    sel("rewards"), sel("classes"),
+  ]);
+  const rmap = byId(rewards), cmap = byId(classesAll);
+  const items = [];
+  credits.forEach(l => items.push({ when: l.created_at, text: esc(nameOf(smap, l.student_id)) + " — " + esc(l.reason) +
+    " (" + (l.delta > 0 ? "+" : "") + l.delta + " credit" + (Math.abs(l.delta) === 1 ? "" : "s") + ")" }));
+  points.forEach(l => items.push({ when: l.created_at, text: esc(nameOf(smap, l.student_id)) + " — " + esc(l.reason) +
+    " (" + (l.delta > 0 ? "+" : "") + l.delta + " point" + (Math.abs(l.delta) === 1 ? "" : "s") + ")" }));
+  invoices.forEach(i => items.push({ when: i.paid_at || i.issued_at, text: "Invoice " + esc(i.invoice_no) + " for " +
+    esc(nameOf(smap, i.student_id)) + (i.status === "paid" ? " marked paid" : " issued") }));
+  bookings.forEach(b => items.push({ when: b.created_at, text: esc(nameOf(smap, b.student_id)) + "'s booking " + esc(b.status) }));
+  redemptions.forEach(r => items.push({ when: r.requested_at, text: esc(nameOf(smap, r.student_id)) + " redeemed " +
+    esc(nameOf(rmap, r.reward_id, "a gift")) + " — " + esc(r.status) }));
+  attendance.forEach(a => items.push({ when: a.marked_at, text: esc(nameOf(smap, a.student_id)) + " marked " + esc(a.status) +
+    " for " + esc(nameOf(cmap, a.class_id, "a class")) }));
+  reports.forEach(r => items.push({ when: r.reported_at, text: esc(nameOf(smap, r.student_id)) + " reported an absence" }));
+
+  const top = items.filter(x => x.when).sort((a, b) => b.when.localeCompare(a.when)).slice(0, 12);
+  if (!top.length) return emptyState("◷", "Nothing yet", "Actions across the centre show up here as they happen.");
+  return "<ul style='margin:0;padding-left:18px;line-height:2'>" +
+    top.map(x => "<li>" + x.text + " <span class='hint'>" + esc(fmtDate(x.when.slice(0, 10))) + "</span></li>").join("") + "</ul>";
+}
+
+async function overviewFinancialTab() {
+  const [students, invoices] = await Promise.all([
+    sel("students", q => q.eq("is_active", true)),
+    sel("invoices"),
+  ]);
+  const smap = byId(students);
+  const monthStart = today().slice(0, 8) + "01";
+  const paidThisMonth = invoices.filter(i => i.status === "paid" && i.paid_at && i.paid_at.slice(0, 10) >= monthStart);
+  const revenueThisMonth = paidThisMonth.reduce((a, i) => a + i.amount_cents, 0);
+  const sentInvoices = invoices.filter(i => i.status === "sent");
+  const outstanding = sentInvoices.reduce((a, i) => a + i.amount_cents, 0);
+  const avgCredits = students.length ? students.reduce((a, s) => a + Number(s.credits), 0) / students.length : 0;
+
+  const stats =
+    '<div class="cols cols-4" style="margin-bottom:18px">' +
+      '<div class="stat"><div class="k">Revenue this month</div><div class="v">' + money(revenueThisMonth) + '</div><div class="n">' +
+        paidThisMonth.length + " invoice" + (paidThisMonth.length === 1 ? "" : "s") + " paid</div></div>" +
+      '<div class="stat' + (outstanding ? " alert" : "") + '"><div class="k">Outstanding</div><div class="v">' + money(outstanding) +
+        '</div><div class="n">' + sentInvoices.length + " unpaid</div></div>" +
+      '<div class="stat"><div class="k">Active students</div><div class="v">' + students.length + '</div><div class="n">on the roll</div></div>' +
+      '<div class="stat"><div class="k">Avg. credits held</div><div class="v">' + avgCredits.toFixed(1) + '</div><div class="n">per active student</div></div>' +
+    "</div>";
+
+  const recentInvoices = invoices.slice().sort((a, b) => (b.issued_at || "").localeCompare(a.issued_at || "")).slice(0, 12);
+  const rows = recentInvoices.map(i => "<tr><td>" + esc(i.invoice_no) + "</td><td>" + esc(nameOf(smap, i.student_id)) + "</td>" +
+    "<td>" + esc(fmtDate(i.issued_at)) + "</td><td><span class='pill " + invPill(i) + "'>" + esc(i.status) + "</span></td>" +
+    '<td class="num money">' + money(i.amount_cents) + "</td></tr>");
+
+  return stats + card("Recent invoices", rows.length
+    ? table(["Invoice", "Student", "Issued", "Status", { t: "Amount", num: true }], rows)
+    : emptyState("$", "No invoices yet", ""), "", true);
+}
+
+async function overviewTodayTab() {
+  const [sessions, classesAll, attendance] = await Promise.all([
+    sel("sessions", q => q.eq("session_date", today()).order("start_time")),
+    sel("classes"),
+    sel("attendance"),
+  ]);
+  const classes = byId(classesAll);
+  const todays = sessions.filter(s => s.status !== "cancelled");
+  const attCounts = {};
+  attendance.forEach(a => (attCounts[a.session_id] = (attCounts[a.session_id] || 0) + 1));
+  const takenCount = todays.filter(s => attCounts[s.id]).length;
+
+  const stats =
+    '<div class="cols cols-3" style="margin-bottom:18px">' +
+      '<div class="stat"><div class="k">Lessons today</div><div class="v">' + todays.length + '</div><div class="n">' + esc(fmtDate(today())) + '</div></div>' +
+      '<div class="stat"><div class="k">Registers taken</div><div class="v">' + takenCount + "/" + todays.length + '</div><div class="n">so far today</div></div>' +
+      '<div class="stat"><div class="k">Open slots</div><div class="v">' + todays.filter(s => s.is_bookable).length + '</div><div class="n">families can still book</div></div>' +
+    "</div>";
+
+  const rows = todays.map(s => {
+    const c = classes[s.class_id] || {};
+    return "<tr><td><b>" + esc(fmtRange(s.start_time, s.end_time)) + "</b></td>" +
+      "<td>" + esc(c.name || "—") + (s.is_bookable ? ' <span class="pill hl">open slot</span>' : "") + "</td>" +
+      "<td>" + esc(s.tutor_name || c.tutor_name || "—") + "</td>" +
+      "<td>" + esc(s.room || c.room || "—") + "</td>" +
+      "<td>" + attendanceTakenPill(attCounts[s.id] || 0) + "</td>" +
+      '<td class="act"><button class="btn btn-sm btn-mint" data-act="take-attendance" data-id="' + s.id + '">Take attendance</button></td></tr>';
+  });
+
+  return stats + card("Today's lessons", todays.length
+    ? table(["Time", "Class", "Tutor", "Room", "Register", ""], rows)
+    : emptyState("◷", "Nothing scheduled today", "Generate sessions from the weekly timetable on the Schedule page."), "", true);
+}
 
 /* ------------------------------------------------------------- SCHEDULE ---- */
 ADMIN.schedule = async function (view) {
@@ -6121,6 +6267,16 @@ const ACTIONS = {
     closeModal();
   },
   "modal-save": () => { const f = $("#modal-host").__onsave; if (f) f(); },
+
+  /* ---- overview --------------------------------------------------------- */
+  "overview-tab": el => { state.overviewTab = el.dataset.v; render(); },
+  "toggle-attn": el => {
+    const body = document.getElementById(el.dataset.id);
+    if (!body) return;
+    const willOpen = body.hidden;
+    body.hidden = !willOpen;
+    el.setAttribute("aria-expanded", String(willOpen));
+  },
 
   /* ---- schedule -------------------------------------------------------- */
   "sched-view": el => { state.scheduleView = el.dataset.v; render(); },
