@@ -345,9 +345,10 @@ table.tbl tr[draggable="true"]:active .drag-handle{cursor:grabbing}
 .day-list{display:flex; flex-direction:column; gap:9px; max-width:460px}
 .day-list .sess{margin:0}
 .month-grid{
-  display:grid; grid-template-columns:repeat(7,1fr); gap:1px; background:var(--line);
+  display:grid; grid-template-columns:repeat(7,minmax(96px,1fr)); gap:1px; background:var(--line);
   border:1px solid var(--line); border-radius:var(--r); overflow:hidden;
 }
+@media (max-width:640px){.month-grid{grid-template-columns:repeat(7,minmax(84px,1fr))}}
 .month-dow{
   background:var(--cream); padding:7px 8px; font-size:10.5px; letter-spacing:.08em;
   text-transform:uppercase; color:var(--ink-soft); font-weight:700; text-align:center;
@@ -3140,7 +3141,7 @@ function scheduleGridHTML(view, anchor, sessions, cmap, opts) {
       cells.push('<div class="month-cell' + (inMonth ? "" : " other-month") + (d === today() ? " today" : "") + '">' +
         '<div class="dnum" data-act="sched-goto-day" data-date="' + d + '">' + dObj.getDate() + "</div>" + shown + more + "</div>");
     }
-    return '<div class="month-grid">' + DOW3.map(x => '<div class="month-dow">' + x + "</div>").join("") + cells.join("") + "</div>";
+    return '<div class="tbl-wrap"><div class="month-grid">' + DOW3.map(x => '<div class="month-dow">' + x + "</div>").join("") + cells.join("") + "</div></div>";
   }
 
   const from = weekStartOf(anchor);
