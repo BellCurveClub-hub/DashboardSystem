@@ -525,6 +525,23 @@ async function runRole(roleName, userId, empty) {
     w.location.hash = "#/schedule"; await w.eval("render()"); await new Promise(r => setTimeout(r, 90));
     check("admin still sees every class",
       /Someone else/.test(w.document.querySelector("#view").textContent));
+
+    // --- schedule: day/week/month view switcher ---
+    w.document.querySelector('[data-act="sched-view"][data-v="day"]').click();
+    await new Promise(r => setTimeout(r, 80));
+    check("day view shows today's lesson", /Sec 3 G3 A-Math/.test(w.document.querySelector("#view").textContent));
+    w.document.querySelector('[data-act="sched-view"][data-v="month"]').click();
+    await new Promise(r => setTimeout(r, 80));
+    const todayCell = w.document.querySelector(".month-cell.today");
+    check("month view highlights today's cell", !!todayCell);
+    check("month view shows a chip for today's lesson", !!todayCell && /Sec 3 G3 A-Math/.test(todayCell.textContent));
+    if (todayCell) {
+      todayCell.querySelector(".dnum").click();
+      await new Promise(r => setTimeout(r, 80));
+      check("clicking a day number drills into day view", w.eval("state.scheduleView") === "day");
+    }
+    w.document.querySelector('[data-act="sched-view"][data-v="week"]').click();
+    await new Promise(r => setTimeout(r, 80));
   }
   if (roleName === "parent" && !empty) {
     w.location.hash = "#/book"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));

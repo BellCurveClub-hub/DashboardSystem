@@ -327,6 +327,32 @@ table.tbl tr[draggable="true"]:active .drag-handle{cursor:grabbing}
 .sess .t{font-size:11.5px; color:var(--ink-soft); font-variant-numeric:tabular-nums; font-weight:600}
 .sess .n{font-size:13px; font-weight:600; color:var(--ink-800); line-height:1.25; margin:1px 0}
 .sess .m{font-size:11.5px; color:var(--ink-soft)}
+.day-list{display:flex; flex-direction:column; gap:9px; max-width:460px}
+.day-list .sess{margin:0}
+.month-grid{
+  display:grid; grid-template-columns:repeat(7,1fr); gap:1px; background:var(--line);
+  border:1px solid var(--line); border-radius:var(--r); overflow:hidden;
+}
+.month-dow{
+  background:var(--cream); padding:7px 8px; font-size:10.5px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--ink-soft); font-weight:700; text-align:center;
+}
+.month-cell{background:var(--paper); min-height:92px; padding:6px; display:flex; flex-direction:column; gap:3px}
+.month-cell.other-month{background:var(--cream)}
+.month-cell.other-month .dnum{color:var(--ink-faint)}
+.month-cell.today .dnum{
+  background:var(--ink-800); color:#fff; border-radius:999px; width:20px; height:20px;
+  display:inline-flex; align-items:center; justify-content:center;
+}
+.month-cell .dnum{font-size:12px; font-weight:700; color:var(--ink-soft); cursor:pointer; margin-bottom:1px}
+.month-chip{
+  font-size:10.5px; padding:2px 5px; border-radius:5px; background:var(--mint-100); color:var(--mint-600);
+  font-weight:600; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.month-chip.adhoc{background:var(--coral-100); color:var(--coral-600)}
+.month-chip.cancelled{opacity:.5; text-decoration:line-through}
+.month-more{font-size:10.5px; color:var(--ink-faint); cursor:pointer; font-weight:600}
+@media (max-width:640px){.month-cell{min-height:64px; padding:4px}.month-chip{font-size:9.5px}}
 .slot-chip{
   margin:5px 7px 0; padding:6px 8px; border-radius:var(--r-sm); font-size:11.5px;
   font-weight:600; text-align:center; font-variant-numeric:tabular-nums;
@@ -2983,9 +3009,104 @@ function weekStartOf(dstr) {
   d.setDate(d.getDate() - d.getDay());
   return iso(d);
 }
-state.weekStart = weekStartOf(today());
+state.scheduleView = "week";     // "day" | "week" | "month"
+state.scheduleAnchor = today();  // the date each view is built around
 state.attDate = today();
 state.bookFrom = today();
+
+// the date window a schedule view needs data for, and its date range
+// query bounds — month needs the full 6-week grid, not just the month's
+// own days, since leading/trailing days from neighbouring months show too
+function scheduleRange(view, anchor) {
+  if (view === "day") return { from: anchor, to: anchor };
+  if (view === "month") {
+    const first = anchor.slice(0, 8) + "01";
+    const d = new Date(first + "T00:00:00");
+    const lastOfMonth = iso(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+    return { from: weekStartOf(first), to: addDays(weekStartOf(lastOfMonth), 6) };
+  }
+  const from = weekStartOf(anchor);
+  return { from, to: addDays(from, 6) };
+}
+function scheduleLabel(view, anchor) {
+  if (view === "day") return fmtDate(anchor);
+  if (view === "month") {
+    const d = new Date(anchor.slice(0, 8) + "01" + "T00:00:00");
+    return MON3[d.getMonth()] + " " + d.getFullYear();
+  }
+  const from = weekStartOf(anchor);
+  return fmtDate(from) + " – " + fmtDate(addDays(from, 6));
+}
+
+// shared by ADMIN.schedule and TUTOR.schedule — the only differences
+// between the two are which click action a lesson uses and what the meta
+// line under its name shows (level+headcount for admin, just room for a
+// tutor), both passed in via opts
+function scheduleGridHTML(view, anchor, sessions, cmap, opts) {
+  opts = opts || {};
+  const cellAction = opts.cellAction || "session-detail";
+  const metaLine = opts.metaLine || (() => "");
+  const sessItem = s => {
+    const c = cmap[s.class_id] || {};
+    const meta = metaLine(s, c);
+    return '<div class="sess' + (s.is_bookable ? " adhoc" : "") + (s.status === "cancelled" ? " cancelled" : "") +
+      '" data-act="' + cellAction + '" data-id="' + s.id + '" tabindex="0">' +
+      '<div class="t">' + esc(fmtRange(s.start_time, s.end_time)) + "</div>" +
+      '<div class="n">' + esc(c.name || "Class") + "</div>" +
+      (meta ? '<div class="m">' + meta + "</div>" : "") + "</div>";
+  };
+
+  if (view === "day") {
+    const day = sessions.filter(s => s.session_date === anchor).slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
+    return '<div class="day-list">' + (day.length ? day.map(sessItem).join("")
+      : emptyState("◷", "Nothing scheduled", "Pick another day, or generate sessions from the timetable.")) + "</div>";
+  }
+
+  if (view === "month") {
+    const first = anchor.slice(0, 8) + "01";
+    const monthNum = new Date(first + "T00:00:00").getMonth();
+    const gridFrom = weekStartOf(first);
+    // a 6th row is only worth drawing if its first day still belongs to
+    // this month — otherwise it's nothing but next-month spillover and
+    // the grid is one row too tall. Checked once, not per cell: a row
+    // that starts in-month but ends past it (the common case) still
+    // needs all 7 of its cells, just with the spillover ones dimmed.
+    const sixthRowNeeded = new Date(addDays(gridFrom, 35) + "T00:00:00").getMonth() === monthNum;
+    const cells = [];
+    for (let i = 0; i < (sixthRowNeeded ? 42 : 35); i++) {
+      const d = addDays(gridFrom, i);
+      const dObj = new Date(d + "T00:00:00");
+      const inMonth = dObj.getMonth() === monthNum;
+      const day = sessions.filter(s => s.session_date === d).slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
+      const shown = day.slice(0, 3).map(s => {
+        const c = cmap[s.class_id] || {};
+        return '<div class="month-chip' + (s.is_bookable ? " adhoc" : "") + (s.status === "cancelled" ? " cancelled" : "") +
+          '" data-act="' + cellAction + '" data-id="' + s.id + '">' + esc(fmtTime(s.start_time)) + " " + esc(c.name || "Class") + "</div>";
+      }).join("");
+      const more = day.length > 3
+        ? '<div class="month-more" data-act="sched-goto-day" data-date="' + d + '">+' + (day.length - 3) + " more</div>" : "";
+      cells.push('<div class="month-cell' + (inMonth ? "" : " other-month") + (d === today() ? " today" : "") + '">' +
+        '<div class="dnum" data-act="sched-goto-day" data-date="' + d + '">' + dObj.getDate() + "</div>" + shown + more + "</div>");
+    }
+    return '<div class="month-grid">' + DOW3.map(x => '<div class="month-dow">' + x + "</div>").join("") + cells.join("") + "</div>";
+  }
+
+  const from = weekStartOf(anchor);
+  const cols = [];
+  for (let i = 0; i < 7; i++) {
+    const d = addDays(from, i);
+    const day = sessions.filter(s => s.session_date === d);
+    cols.push('<div class="week-col' + (d === today() ? " today" : "") + '">' +
+      '<div class="dh">' + DOW3[i] + " <b>" + fmtDateShort(d) + "</b></div>" + day.map(sessItem).join("") + "</div>");
+  }
+  return '<div class="tbl-wrap"><div class="week-grid">' + cols.join("") + "</div></div>";
+}
+
+function scheduleViewSwitcher() {
+  return '<div class="tabs-seg" style="margin:0" role="tablist">' +
+    ["day", "week", "month"].map(v => '<button role="tab" aria-selected="' + (state.scheduleView === v) + '" data-act="sched-view" data-v="' + v +
+      '">' + v[0].toUpperCase() + v.slice(1) + "</button>").join("") + "</div>";
+}
 
 /* ------------------------------------------------------------- OVERVIEW ---- */
 ADMIN.overview = async function (view) {
@@ -3050,7 +3171,8 @@ ADMIN.overview = async function (view) {
 
 /* ------------------------------------------------------------- SCHEDULE ---- */
 ADMIN.schedule = async function (view) {
-  const from = state.weekStart, to = addDays(from, 6);
+  const view_ = state.scheduleView, anchor = state.scheduleAnchor;
+  const { from, to } = scheduleRange(view_, anchor);
   const [sessions, classes, bookings, levels] = await Promise.all([
     sel("sessions", q => q.gte("session_date", from).lte("session_date", to).order("start_time")),
     sel("classes", q => q.order("name")),
@@ -3061,33 +3183,26 @@ ADMIN.schedule = async function (view) {
   const counts = {};
   bookings.forEach(b => (counts[b.session_id] = (counts[b.session_id] || 0) + (b.status === "confirmed" ? 1 : 0)));
 
-  const cols = [];
-  for (let i = 0; i < 7; i++) {
-    const d = addDays(from, i);
-    const day = sessions.filter(s => s.session_date === d);
-    const items = day.map(s => {
-      const c = cmap[s.class_id] || {};
+  const grid = scheduleGridHTML(view_, anchor, sessions, cmap, {
+    cellAction: "session-detail",
+    metaLine: (s, c) => {
       const lv = lvMap[c.level_id];
-      return '<div class="sess' + (s.is_bookable ? " adhoc" : "") + (s.status === "cancelled" ? " cancelled" : "") +
-        '" data-act="session-detail" data-id="' + s.id + '" tabindex="0">' +
-        '<div class="t">' + esc(fmtRange(s.start_time, s.end_time)) + "</div>" +
-        '<div class="n">' + esc(c.name || "Class") + "</div>" +
-        '<div class="m">' + (lv ? esc(lv.name) + " · " : "") + (counts[s.id] || 0) + "/" + s.capacity + "</div></div>";
-    }).join("");
-    cols.push('<div class="week-col' + (d === today() ? " today" : "") + '">' +
-      '<div class="dh">' + DOW3[i] + " <b>" + fmtDateShort(d) + "</b></div>" + items + "</div>");
-  }
+      return (lv ? esc(lv.name) + " · " : "") + (counts[s.id] || 0) + "/" + s.capacity;
+    },
+  });
 
   view.innerHTML =
-    pageHead("Schedule", fmtDate(from) + " – " + fmtDate(to),
-      '<div class="btn-row">' +
-        '<button class="btn btn-ghost" data-act="week" data-d="-7">‹ Previous</button>' +
-        '<button class="btn btn-ghost" data-act="week" data-d="0">This week</button>' +
-        '<button class="btn btn-ghost" data-act="week" data-d="7">Next ›</button>' +
-        '<button class="btn btn-mint" data-act="generate-sessions">Generate from timetable</button>' +
-        '<button class="btn btn-primary" data-act="new-session">Add a slot</button>' +
-      "</div>") +
-    '<div class="tbl-wrap"><div class="week-grid">' + cols.join("") + "</div></div>" +
+    pageHead("Schedule", scheduleLabel(view_, anchor),
+      '<div class="row" style="gap:14px">' +
+        scheduleViewSwitcher() +
+        '<div class="btn-row">' +
+          '<button class="btn btn-ghost" data-act="sched-nav" data-d="-1">‹ Previous</button>' +
+          '<button class="btn btn-ghost" data-act="sched-nav" data-d="0">Today</button>' +
+          '<button class="btn btn-ghost" data-act="sched-nav" data-d="1">Next ›</button>' +
+          '<button class="btn btn-mint" data-act="generate-sessions">Generate from timetable</button>' +
+          '<button class="btn btn-primary" data-act="new-session">Add a slot</button>' +
+        "</div></div>") +
+    grid +
     '<div class="legend" style="margin-top:12px">' +
       '<span><i style="background:#2EC4B6"></i>Timetabled class</span>' +
       '<span><i style="background:#F2664B"></i>Open slot families can book</span>' +
@@ -5642,30 +5757,26 @@ TUTOR.overview = async function (view) {
 
 /* ---------------------------------------------------------- MY SCHEDULE --- */
 TUTOR.schedule = async function (view) {
-  const from = state.weekStart, to = addDays(from, 6);
+  const view_ = state.scheduleView, anchor = state.scheduleAnchor;
+  const { from, to } = scheduleRange(view_, anchor);
   const { ids, map } = await myClassIds();
   const sessions = mine(await sel("sessions", q => q.gte("session_date", from).lte("session_date", to).order("start_time")), ids);
 
-  const cols = [];
-  for (let i = 0; i < 7; i++) {
-    const d = addDays(from, i);
-    const items = sessions.filter(s => s.session_date === d).map(s =>
-      '<div class="sess' + (s.is_bookable ? " adhoc" : "") + (s.status === "cancelled" ? " cancelled" : "") +
-      '" data-act="take-attendance" data-id="' + s.id + '" tabindex="0">' +
-      '<div class="t">' + esc(fmtRange(s.start_time, s.end_time)) + "</div>" +
-      '<div class="n">' + esc(nameOf(map, s.class_id, "Class")) + "</div>" +
-      '<div class="m">' + esc(s.room || "") + "</div></div>").join("");
-    cols.push('<div class="week-col' + (d === today() ? " today" : "") + '">' +
-      '<div class="dh">' + DOW3[i] + " <b>" + fmtDateShort(d) + "</b></div>" + items + "</div>");
-  }
+  const grid = scheduleGridHTML(view_, anchor, sessions, map, {
+    cellAction: "take-attendance",
+    metaLine: s => esc(s.room || ""),
+  });
 
   view.innerHTML =
-    pageHead("My schedule", fmtDate(from) + " – " + fmtDate(to),
-      '<div class="btn-row">' +
-        '<button class="btn btn-ghost" data-act="week" data-d="-7">‹ Previous</button>' +
-        '<button class="btn btn-ghost" data-act="week" data-d="0">This week</button>' +
-        '<button class="btn btn-ghost" data-act="week" data-d="7">Next ›</button></div>') +
-    '<div class="tbl-wrap"><div class="week-grid">' + cols.join("") + "</div></div>" +
+    pageHead("My schedule", scheduleLabel(view_, anchor),
+      '<div class="row" style="gap:14px">' +
+        scheduleViewSwitcher() +
+        '<div class="btn-row">' +
+          '<button class="btn btn-ghost" data-act="sched-nav" data-d="-1">‹ Previous</button>' +
+          '<button class="btn btn-ghost" data-act="sched-nav" data-d="0">Today</button>' +
+          '<button class="btn btn-ghost" data-act="sched-nav" data-d="1">Next ›</button>' +
+        "</div></div>") +
+    grid +
     '<p class="hint" style="margin-top:12px">Tap a lesson to take the register.</p>';
 };
 
@@ -5965,11 +6076,19 @@ const ACTIONS = {
   "modal-save": () => { const f = $("#modal-host").__onsave; if (f) f(); },
 
   /* ---- schedule -------------------------------------------------------- */
-  week: el => {
+  "sched-view": el => { state.scheduleView = el.dataset.v; render(); },
+  "sched-nav": el => {
     const d = Number(el.dataset.d);
-    state.weekStart = d === 0 ? weekStartOf(today()) : addDays(state.weekStart, d);
+    if (d === 0) { state.scheduleAnchor = today(); render(); return; }
+    if (state.scheduleView === "day") state.scheduleAnchor = addDays(state.scheduleAnchor, d);
+    else if (state.scheduleView === "month") {
+      const dt = new Date(state.scheduleAnchor.slice(0, 8) + "01T00:00:00");
+      dt.setMonth(dt.getMonth() + d);
+      state.scheduleAnchor = iso(dt);
+    } else state.scheduleAnchor = addDays(state.scheduleAnchor, d * 7);
     render();
   },
+  "sched-goto-day": el => { state.scheduleAnchor = el.dataset.date; state.scheduleView = "day"; render(); },
   "new-session": () => sessionForm(null),
   "session-detail": el => sessionDetail(el.dataset.id),
   "session-cancel": async el => {
@@ -5980,7 +6099,7 @@ const ACTIONS = {
     catch (e) { fail(e); }
   },
   "generate-sessions": async () => {
-    const from = state.weekStart, to = addDays(from, 27);
+    const from = weekStartOf(state.scheduleAnchor), to = addDays(from, 27);
     if (!(await confirmBox("Generate sessions?", "Creates one session for every fixed class between " + fmtDate(from) + " and " + fmtDate(to) + ". Existing ones are left alone."))) return;
     try {
       const { data, error } = await db.rpc("generate_sessions", { p_from: from, p_to: to });

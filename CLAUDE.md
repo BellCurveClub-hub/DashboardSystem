@@ -168,7 +168,10 @@ chips, not just a list (see below) · a parent with more than one child can
 book one slot for one or both at once (see below) · a confirm-your-email
 screen after sign-up when the Supabase project requires it (see below) ·
 levels and streams are admin-managed reference data, not free text, and
-gate fixed-class drop-in eligibility together with subject (see below).
+gate fixed-class drop-in eligibility together with subject (see below) ·
+a considered rule stops a new slot leaving a tutor an awkward gap (see
+below) · Schedule (admin and tutor) switches between day, week and
+month views around one shared anchor date (see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -465,6 +468,38 @@ before and nearest after — and also rejects a straight overlap.
   a different order lands on a different grid, which is a strange thing
   to explain six months from now. The plain gap rule needed no schema
   change and no new state.
+
+**Schedule as day/week/month.** Admin's Schedule and (My) Tutor schedule
+used to be a week-grid only. `state.scheduleView` (`"day"`/`"week"`/
+`"month"`) plus a single `state.scheduleAnchor` date now drive all three —
+one anchor rather than three separate ones, so switching views keeps you
+looking at roughly the same place instead of jumping.
+
+- `scheduleRange(view, anchor)` returns the query window each view needs —
+  month fetches the full 6-week grid, not just the calendar month's own
+  days, since neighbouring-month days show (dimmed) too.
+  `scheduleGridHTML(view, anchor, sessions, cmap, opts)` renders whichever
+  grid shape from the same session list; `opts.cellAction` and
+  `opts.metaLine` are the only two things that differ between admin
+  (`session-detail`, level + headcount) and tutor (`take-attendance`,
+  room) — everything else is shared.
+- Month is a real calendar grid, not a list — up to 3 session chips per
+  day, "+N more" beyond that. Both a day number and "+N more" call
+  `sched-goto-day`, which jumps straight to Day view for that date — the
+  natural drill-down.
+- The 6th grid row is only drawn when it's actually needed (checked once,
+  by whether *its first day* still falls in the target month) — a month
+  that fits in 5 rows doesn't get a dangling half-empty 6th one. A day
+  that starts in-month but spills into the next still gets all 7 of its
+  cells, just with the spillover ones dimmed — the trim is a whole-row
+  decision, not a per-cell one.
+- `generate-sessions` (bulk-create from the weekly timetable) now anchors
+  its 4-week range on `weekStartOf(state.scheduleAnchor)` instead of a
+  separate `state.weekStart` — one less piece of state, and it does the
+  sensible thing from whichever view you're looking at when you click it.
+- Year view was considered and dropped — most weeks in a term look the
+  same, so a full year at once is mostly empty space and not something
+  admins actually asked to see.
 
 **Next, in order:**
 
