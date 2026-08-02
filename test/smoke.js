@@ -352,7 +352,17 @@ async function runRole(roleName, userId, empty) {
       await new Promise(r => setTimeout(r, 60));
       check("expanding a row reveals contact links", lcToggle.getAttribute("aria-expanded") === "true" &&
         !!w.document.querySelector('a[href^="mailto:"], a[href^="tel:"]'));
+      check("no Send email button while notifications_email is off", !w.document.querySelector('[data-act="send-notify"]'));
     }
+    await w.eval('state.settings.notifications_email = 1; render();');
+    await new Promise(r => setTimeout(r, 80));
+    const sendBtn = w.document.querySelector('[data-act="toggle-attn"]');
+    if (sendBtn) { sendBtn.click(); await new Promise(r => setTimeout(r, 60)); }
+    const creditSendBtn = w.document.querySelector('[data-act="send-notify"][data-kind="low-credit"]');
+    check("Send credit alert button appears once notifications_email is on", !!creditSendBtn);
+    await w.eval('state.settings.notifications_email = 0; render();');
+    await new Promise(r => setTimeout(r, 80));
+
     w.document.querySelector('[data-act="overview-tab"][data-v="financial"]').click();
     await new Promise(r => setTimeout(r, 80));
     check("financial tab shows a revenue stat", /Revenue this month/.test(w.document.querySelector("#view").textContent));

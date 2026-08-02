@@ -1813,7 +1813,8 @@ insert into settings (key, value) values
   ('paynow_id',              '{"s":""}'),
   ('invoice_terms',          '{"s":"Payment is due within 7 days. Lesson credits are added once payment is received."}'),
   ('centre_contact',         '{"s":""}'),
-  ('payments_online',        '{"n":0}')
+  ('payments_online',        '{"n":0}'),
+  ('notifications_email',    '{"n":0}')
 on conflict (key) do nothing;
 
 insert into subjects (name, colour) values
@@ -2385,6 +2386,147 @@ Deno.serve(async function (req) {
     if (new URL(req.url).pathname.endsWith("/webhook")) return await webhook(req);
     if (req.method !== "POST") return json({ error: "POST only." }, 405);
     return await createCheckout(req);
+  } catch (e) {
+    return json({ error: String(e && e.message ? e.message : e) }, 500);
+  }
+});
+`;
+
+/* ============================================================================
+   SETUP PAYLOAD 3 of 3 — Supabase Edge Function that sends notification
+   email through Brevo. Manual-trigger only for now (an admin clicks
+   "Send") — no scheduled/automatic sending, that's a separate step.
+   ========================================================================== */
+const EDGE_FN_EMAIL = String.raw`
+// supabase/functions/notify/index.ts
+//
+// Deploy:
+//   supabase functions deploy notify --no-verify-jwt
+//
+// Secrets (Supabase -> Edge Functions -> Secrets):
+//   BREVO_API_KEY      your Brevo (formerly Sendinblue) API key
+//   BREVO_SENDER_EMAIL a sender address verified in Brevo -- it will
+//                      refuse to send from anything else
+//   SITE_URL           https://<you>.github.io/<repo>/  linked from every email
+//
+// One route: POST /notify  { kind: "invoice" | "reminder" | "low-credit", id }
+// Caller must be signed in AND an admin -- this only ever fires from a
+// button an admin clicks in the portal. No automatic/scheduled sending.
+//
+// Brevo's transactional email API (v3, smtp/email) — verify against
+// https://developers.brevo.com/reference/sendtransacemail if this is
+// ever revisited, but the shape below has been stable for years.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+const BREVO_KEY    = Deno.env.get("BREVO_API_KEY") || "";
+const SENDER_EMAIL = Deno.env.get("BREVO_SENDER_EMAIL") || "";
+const SITE_URL     = Deno.env.get("SITE_URL") || "";
+const SB_URL       = Deno.env.get("SUPABASE_URL");
+
+function json(body, status) {
+  return new Response(JSON.stringify(body), {
+    status: status || 200,
+    headers: Object.assign({ "Content-Type": "application/json" }, CORS),
+  });
+}
+function money(cents) { return "$" + (cents / 100).toFixed(2); }
+
+async function sendEmail(to, toName, subject, html) {
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "api-key": BREVO_KEY },
+    body: JSON.stringify({
+      sender: { email: SENDER_EMAIL },
+      to: [{ email: to, name: toName || undefined }],
+      subject: subject,
+      htmlContent: html,
+    }),
+  });
+  const data = await res.json().catch(function () { return null; });
+  if (!res.ok) throw new Error((data && (data.message || JSON.stringify(data))) || "Brevo refused the request.");
+  return data;
+}
+
+Deno.serve(async function (req) {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  try {
+    if (req.method !== "POST") return json({ error: "POST only." }, 405);
+
+    const authHeader = req.headers.get("Authorization") || "";
+    if (!authHeader) return json({ error: "Sign in first." }, 401);
+    // RLS + this role check together are what prove the caller may send —
+    // there is no service-role client in this function at all
+    const asUser = createClient(SB_URL, Deno.env.get("SUPABASE_ANON_KEY"), {
+      global: { headers: { Authorization: authHeader } },
+      auth: { persistSession: false },
+    });
+    const userRes = await asUser.auth.getUser();
+    const user = userRes.data && userRes.data.user;
+    if (!user) return json({ error: "Sign in first." }, 401);
+
+    const me = await asUser.from("profiles").select("role").eq("id", user.id).single();
+    if (!me.data || me.data.role !== "admin") return json({ error: "Admins only." }, 403);
+
+    const body = await req.json().catch(function () { return {}; });
+    const kind = body.kind;
+
+    const settingsRows = await asUser.from("settings").select("key,value");
+    const settings = {};
+    (settingsRows.data || []).forEach(function (r) {
+      settings[r.key] = r.value && (r.value.n !== undefined ? r.value.n : r.value.s);
+    });
+    const centreName = settings.centre_name || "the centre";
+
+    if (kind === "invoice" || kind === "reminder") {
+      const inv = await asUser.from("invoices").select("*").eq("id", body.id).single();
+      if (inv.error || !inv.data) return json({ error: "Invoice not found." }, 404);
+      const student = inv.data.student_id
+        ? await asUser.from("students").select("full_name").eq("id", inv.data.student_id).single() : null;
+      const parent = inv.data.parent_id
+        ? await asUser.from("profiles").select("full_name,email").eq("id", inv.data.parent_id).single() : null;
+      if (!parent || !parent.data || !parent.data.email) return json({ error: "No parent email on file." }, 400);
+
+      const isReminder = kind === "reminder";
+      const studentName = (student && student.data && student.data.full_name) || "your child";
+      const subject = (isReminder ? "Reminder: " : "") + "Invoice " + inv.data.invoice_no + " from " + centreName;
+      const html =
+        "<p>Hi " + (parent.data.full_name || "there") + ",</p>" +
+        "<p>" + (isReminder
+          ? "This is a friendly reminder that invoice " + inv.data.invoice_no + " for " + studentName + " is still outstanding."
+          : "A new invoice has been issued for " + studentName + ".") + "</p>" +
+        "<p><b>Amount:</b> " + money(inv.data.amount_cents) + "<br>" +
+        "<b>Due:</b> " + (inv.data.due_at || "on receipt") + "</p>" +
+        (settings.paynow_id ? "<p>Pay by PayNow to <b>" + settings.paynow_id + "</b> and include the invoice number as the reference.</p>" : "") +
+        "<p><a href='" + SITE_URL + "'>Log in to " + centreName + "</a> to see the full invoice.</p>";
+      await sendEmail(parent.data.email, parent.data.full_name, subject, html);
+      return json({ ok: true });
+    }
+
+    if (kind === "low-credit") {
+      const student = await asUser.from("students").select("full_name,credits,parent_id").eq("id", body.id).single();
+      if (student.error || !student.data) return json({ error: "Student not found." }, 404);
+      const parent = student.data.parent_id
+        ? await asUser.from("profiles").select("full_name,email").eq("id", student.data.parent_id).single() : null;
+      if (!parent || !parent.data || !parent.data.email) return json({ error: "No parent email on file." }, 400);
+
+      const credits = student.data.credits;
+      const subject = student.data.full_name + " is running low on lesson credits";
+      const html =
+        "<p>Hi " + (parent.data.full_name || "there") + ",</p>" +
+        "<p>" + student.data.full_name + " has " + credits + " lesson credit" + (Number(credits) === 1 ? "" : "s") +
+        " left. Top up soon so lessons are not interrupted.</p>" +
+        "<p><a href='" + SITE_URL + "'>Log in to " + centreName + "</a> to buy another package.</p>";
+      await sendEmail(parent.data.email, parent.data.full_name, subject, html);
+      return json({ ok: true });
+    }
+
+    return json({ error: "Unknown notification kind." }, 400);
   } catch (e) {
     return json({ error: String(e && e.message ? e.message : e) }, 500);
   }
@@ -3185,14 +3327,21 @@ ADMIN.overview = async function (view) {
 // exists yet (both deferred elsewhere in this project), so these are
 // plain protocol links against the contact details already on file,
 // not a real send — the fastest thing that's actually true today
-function contactLinksHTML(parent) {
+function contactLinksHTML(parent, sendBtnHTML) {
   if (!parent) return "<p class='hint'>No parent account linked.</p>";
   const links = [];
+  if (sendBtnHTML) links.push(sendBtnHTML);
   if (parent.email) links.push('<a class="btn btn-sm btn-ghost" href="mailto:' + esc(parent.email) + '">Email</a>');
   if (parent.phone) links.push('<a class="btn btn-sm btn-ghost" href="tel:' + esc(parent.phone) + '">Call</a>');
   if (parent.phone) links.push('<a class="btn btn-sm btn-ghost" href="sms:' + esc(parent.phone) + '">Message</a>');
   return '<div class="btn-row" style="margin-top:8px">' +
     (links.length ? links.join("") : "<span class='hint'>No email or phone on file.</span>") + "</div>";
+}
+// only rendered once notifications_email is switched on (Settings) — the
+// notify function has to actually be deployed and configured first
+function sendEmailButtonHTML(kind, id, label) {
+  if (Number(state.settings.notifications_email) !== 1 || !id) return "";
+  return '<button class="btn btn-sm btn-mint" data-act="send-notify" data-kind="' + esc(kind) + '" data-id="' + esc(id) + '">' + esc(label) + "</button>";
 }
 // a click-to-expand row — used for the low-credit and overdue-payment
 // lists, which can otherwise run long once a centre has a real roll
@@ -3233,14 +3382,17 @@ async function overviewAttentionTab() {
   const lowCreditRows = lowCredit.map(s => expandRowHTML("lc-" + s.id,
     "<span>" + esc(s.full_name) + "</span><span class='pill bad'>" + s.credits + " credit" + (Number(s.credits) === 1 ? "" : "s") + " left</span>",
     "<p class='hint' style='margin-bottom:0'>Parent: " + esc(pmap[s.parent_id] ? pmap[s.parent_id].full_name : "not linked") + "</p>" +
-      contactLinksHTML(pmap[s.parent_id]))).join("");
+      contactLinksHTML(pmap[s.parent_id], sendEmailButtonHTML("low-credit", s.id, "Send credit alert")))).join("");
 
   const overdueRows = overdue.map(i => expandRowHTML("ov-" + i.id,
     "<span>" + esc(nameOf(smap, i.student_id)) + "</span><span class='pill bad'>" + money(i.amount_cents) + " · due " + esc(fmtDate(i.due_at)) + "</span>",
     "<p class='hint' style='margin-bottom:0'>Invoice " + esc(i.invoice_no) + " · Parent: " +
-      esc(pmap[i.parent_id] ? pmap[i.parent_id].full_name : "not linked") + "</p>" + contactLinksHTML(pmap[i.parent_id]))).join("");
+      esc(pmap[i.parent_id] ? pmap[i.parent_id].full_name : "not linked") + "</p>" +
+      contactLinksHTML(pmap[i.parent_id], sendEmailButtonHTML("reminder", i.id, "Send reminder")))).join("");
 
   return stats +
+    (Number(state.settings.notifications_email) !== 1
+      ? '<div class="note">Email sending is off — turn it on in Settings once the notification function is deployed, and Send buttons appear here.</div>' : "") +
     (waiting.length ? card("Waiting on you", "<ul style='margin:0;padding-left:18px;line-height:1.9'>" + waiting.join("") + "</ul>", "", true) : "") +
     card("Running low on credits (" + lowCredit.length + ")",
       lowCreditRows || emptyState("✓", "Nobody's low", "Every active student has enough credits."), "", true) +
@@ -3311,10 +3463,11 @@ async function overviewFinancialTab() {
   const recentInvoices = invoices.slice().sort((a, b) => (b.issued_at || "").localeCompare(a.issued_at || "")).slice(0, 12);
   const rows = recentInvoices.map(i => "<tr><td>" + esc(i.invoice_no) + "</td><td>" + esc(nameOf(smap, i.student_id)) + "</td>" +
     "<td>" + esc(fmtDate(i.issued_at)) + "</td><td><span class='pill " + invPill(i) + "'>" + esc(i.status) + "</span></td>" +
-    '<td class="num money">' + money(i.amount_cents) + "</td></tr>");
+    '<td class="num money">' + money(i.amount_cents) + "</td>" +
+    '<td class="act">' + (i.status === "sent" ? sendEmailButtonHTML("invoice", i.id, "Send") : "") + "</td></tr>");
 
   return stats + card("Recent invoices", rows.length
-    ? table(["Invoice", "Student", "Issued", "Status", { t: "Amount", num: true }], rows)
+    ? table(["Invoice", "Student", "Issued", "Status", { t: "Amount", num: true }, ""], rows)
     : emptyState("$", "No invoices yet", ""), "", true);
 }
 
@@ -4799,6 +4952,10 @@ ADMIN.settings = async function (view) {
       fCheck("set_payments_online", "Show parents a Pay now button (needs the payment function deployed)",
         Number(s.payments_online) === 1) +
       '<div class="hint">Leave this off while you are collecting by PayNow. Parents then see your PayNow details on the invoice instead.</div>') +
+    card("Notification email",
+      fCheck("set_notifications_email", "Allow sending invoice, reminder and low-credit emails (needs the notification function deployed)",
+        Number(s.notifications_email) === 1) +
+      '<div class="hint">Sent one at a time, only when you click Send on the Overview page — never automatically. Leave this off until Brevo is set up.</div>') +
     card("Reward points",
       '<div class="grid-2">' +
         fText("set_points_attendance", "Attending a lesson", s.points_attendance === undefined ? 10 : s.points_attendance, { type: "number" }) +
@@ -4818,12 +4975,12 @@ ADMIN.setup = async function (view) {
   view.innerHTML =
     pageHead("Setup & SQL", "Everything the server side needs, kept inside this one file") +
     card("How the pieces fit together",
-      "<p>This page is a static file. It talks straight to Supabase for data, and to one small server-side function for payments — " +
-      "that function is where the HitPay secret key lives, so it never reaches a browser.</p>" +
+      "<p>This page is a static file. It talks straight to Supabase for data, and to two small server-side functions — " +
+      "one for payments, one for notification email — since that's where the HitPay and Brevo secret keys live, so neither ever reaches a browser.</p>" +
       "<ol style='line-height:1.9;padding-left:20px'>" +
         "<li>Create a Supabase project. Copy the <b>Project URL</b> and <b>anon public key</b> into the CONFIG block at the top of this file.</li>" +
         "<li>Open the SQL editor in Supabase, paste the script below and run it. It is safe to run more than once.</li>" +
-        "<li>Deploy the payment function and set its secrets (both shown below).</li>" +
+        "<li>Deploy the payment and notification functions and set their secrets (both shown below).</li>" +
         "<li>Sign up your own account, then in the Supabase table editor set your row in <b>profiles</b> to role <code>admin</code>.</li>" +
         "<li>Commit this file as <code>index.html</code> and turn on GitHub Pages.</li>" +
       "</ol>" +
@@ -4844,6 +5001,19 @@ ADMIN.setup = async function (view) {
         "<tr><td><code>HITPAY_SALT</code></td><td>Your HitPay webhook salt, used to verify callbacks</td></tr>",
         "<tr><td><code>HITPAY_BASE</code></td><td><code>https://api.sandbox.hit-pay.com/v1</code> while testing, <code>https://api.hit-pay.com/v1</code> when live</td></tr>",
         "<tr><td><code>SITE_URL</code></td><td>Where parents come back to after paying — your GitHub Pages address</td></tr>",
+      ]), "", true) +
+    card("4 · Notification email function (Deno, deployed to Supabase)",
+      '<div class="btn-row" style="margin-bottom:10px">' +
+        '<button class="btn btn-mint" data-act="copy-edge-email">Copy the function</button></div>' +
+      '<div class="note">Deploy it with <code>supabase functions deploy notify --no-verify-jwt</code>. ' +
+      "Sends invoice, payment-reminder and low-credit emails through Brevo — only when an admin clicks Send on the Overview page, " +
+      "never automatically. Needs a Brevo account with a verified sender email/domain.</div>" +
+      '<div class="code" id="edgeboxemail">' + esc(EDGE_FN_EMAIL.trim()) + "</div>") +
+    card("5 · Email secrets to set in Supabase",
+      table(["Name", "What to put in it"], [
+        "<tr><td><code>BREVO_API_KEY</code></td><td>Your Brevo API key</td></tr>",
+        "<tr><td><code>BREVO_SENDER_EMAIL</code></td><td>A sender address verified in Brevo — it refuses to send from anything else</td></tr>",
+        "<tr><td><code>SITE_URL</code></td><td>Same value as above — shared across every function in the project</td></tr>",
       ]), "", true);
 };
 
@@ -6588,6 +6758,7 @@ const ACTIONS = {
       paynow_id: { s: $("#f_set_paynow_id").value },
       invoice_terms: { s: $("#f_set_invoice_terms").value },
       payments_online: { n: $('[name="set_payments_online"]').checked ? 1 : 0 },
+      notifications_email: { n: $('[name="set_notifications_email"]').checked ? 1 : 0 },
       cancel_hours: { n: Number($("#f_set_cancel_hours").value || 0) },
       booking_auto_confirm: { n: $('[name="set_booking_auto_confirm"]').checked ? 1 : 0 },
       points_attendance: { n: Number($("#f_set_points_attendance").value || 0) },
@@ -6656,6 +6827,16 @@ const ACTIONS = {
   /* ---- setup ----------------------------------------------------------- */
   "copy-sql": () => copyText(SQL_SCHEMA.trim(), "SQL"),
   "copy-edge": () => copyText(EDGE_FN.trim(), "Function"),
+  "copy-edge-email": () => copyText(EDGE_FN_EMAIL.trim(), "Function"),
+  "send-notify": async el => {
+    el.disabled = true;
+    try {
+      const { data, error } = await db.functions.invoke("notify", { body: { kind: el.dataset.kind, id: el.dataset.id } });
+      if (error) throw error;
+      if (data && data.error) throw new Error(data.error);
+      toast("Email sent.", "ok");
+    } catch (e) { fail(e); } finally { el.disabled = false; }
+  },
 };
 
 document.addEventListener("click", ev => {

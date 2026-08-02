@@ -177,7 +177,8 @@ below) · the sidebar keeps its scroll position across navigation (see
 below) · the admin Overview is split into Needs attention (default),
 Financial and Today's lessons tabs, with expandable low-credit/overdue
 rows offering mailto/tel/sms contact links and a recent-actions feed
-(see below).
+(see below) · a second Edge Function sends invoice, reminder and
+low-credit email through Brevo, manual-trigger only (see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -574,21 +575,57 @@ up front.
   Attendance page rather than inventing a second way to say the same
   thing.
 
+**Notification email, via Brevo.** A second Edge Function alongside HitPay's
+— same deployed-separately, secrets-never-reach-the-browser pattern. Sends
+three kinds of email: an issued invoice, a payment reminder for one that's
+overdue, and a low-credit alert. Manual-trigger only, on purpose: an admin
+clicks Send; nothing runs on a schedule or fires automatically off a
+threshold. That's a deliberately smaller first step than "automated
+notifications," which needs a scheduled trigger this project doesn't have
+yet — see the deferred list below.
+
+- `notifications_email` (Setup & SQL → Settings, same pattern as
+  `payments_online`) gates it. Off by default; `sendEmailButtonHTML()`
+  renders nothing at all until it's on, so there's no dead button pointing
+  at an undeployed function.
+- The function itself never uses a service-role client — the caller's own
+  session both proves *and limits* what it can read (RLS), and the
+  function additionally checks the caller's `profiles.role === 'admin'`
+  before sending anything. HitPay's webhook needs service-role because an
+  external, unauthenticated party calls it; this function is only ever
+  called by an already-authenticated admin, so it doesn't need that
+  escalation.
+- Send buttons live where the *decision* to send already happens: the
+  low-credit and overdue-invoice rows on Overview's Needs Attention tab
+  (next to the existing mailto/tel/sms links), and the Financial tab's
+  recent-invoices table for a freshly issued (`status = 'sent'`) invoice.
+  Not on paid or void invoices — there's nothing to remind about.
+- Building the actual HTML email templates required knowing Brevo's exact
+  request shape (`sender`/`to`/`subject`/`htmlContent` to
+  `POST /v3/smtp/email` with an `api-key` header) — this is Brevo's
+  long-stable v3 transactional email contract, but it was written from
+  that known shape rather than tested against a live Brevo account, since
+  this project has no Brevo credentials to test with. Worth a real send
+  once deployed, before relying on it.
+
 **Next, in order:**
 
 1. Term and holiday calendar — decided: a marked holiday blocks families from
    booking any slot on that date (including ad-hoc bookable ones), not just
    suppress auto-generation of recurring sessions.
 2. Announcements to parents
-3. Notification centre (in-app) and the email sender
+3. Notification centre (in-app), and turning the email sender (built,
+   manual-trigger only — see below) into something automatic/scheduled
 
 **Deferred on purpose — do not build until asked:**
 
 - **HitPay checkout.** The Edge Function is written and lives in the Setup
   tab. The `payments_online` setting hides the parent Pay-now button until it
   is deployed; parents see PayNow instructions instead.
-- **Email sending.** Notifications are to be stored and shown in-app first;
-  the sender follows the same deferred-function pattern.
+- **Automatic/scheduled email.** The sender itself is built (see below), but
+  only ever fires when an admin clicks Send — nothing runs on a timer or a
+  threshold crossing yet. That needs a scheduled trigger (Supabase cron or
+  similar), which is new infrastructure on top of what exists now.
 - **Twilio Trust Hub / Business Profile (SMS phone verification).** The app
   code and schema for phone verification are already built and live (My
   account → Mobile → send code/confirm code, `phone_verified` on
