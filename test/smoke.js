@@ -177,6 +177,17 @@ function fixtures() {
         points_awarded: 45, band_points: 45, bonus_points: 0, submitted_by: UID.tutor, approved_by: UID.tutor,
         approved_at: new Date().toISOString(), notes: null, created_at: new Date().toISOString() },
     ],
+    announcements: [
+      { id: "an1", title: "Welcome back", body: "Term starts next Monday. See you then!", created_by: UID.admin, created_at: new Date().toISOString() },
+      { id: "an2", title: "A-Math class change", body: "Sec 3 G3 A-Math moves to Room 2 this week.", created_by: UID.admin, created_at: new Date().toISOString() },
+    ],
+    // an2 is targeted at cl1 -- exists mainly so the admin list can show
+    // "Sent to Sec 3 G3 A-Math" instead of "Sent to every family"; the fake
+    // client has no RLS, so the targeting-hides-it-from-other-families half
+    // of this feature isn't something this harness can exercise
+    announcement_classes: [
+      { id: "ac1", announcement_id: "an2", class_id: "cl1" },
+    ],
     settings: [
       { key: "centre_name", value: { s: "Bell Curve Club" } },
       { key: "tagline", value: { s: "on the right side of the curve" } },
@@ -240,7 +251,7 @@ function makeClient(DB, userId) {
   function query(table) {
     let rows = () => (DB[table] || []).slice();
     const filters = [];
-    let head = false, wantCount = false, single = false, maybe = false, limit = null;
+    let head = false, wantCount = false, single = false, maybe = false, limit = null, inserted = null;
     const api = {
       select(_c, o) { if (o && o.head) head = true; if (o && o.count) wantCount = true; return api; },
       eq(c, v) { filters.push(r => String(r[c]) === String(v)); return api; },
@@ -252,13 +263,26 @@ function makeClient(DB, userId) {
       limit(n) { limit = n; return api; },
       single() { single = true; return api; },
       maybeSingle() { maybe = true; return api; },
-      insert(v) { const arr = Array.isArray(v) ? v : [v]; arr.forEach((r, i) => DB[table].push(Object.assign({ id: table + "_new" + i }, r))); return api; },
+      // mirrors two things real Postgres/Supabase does that the row payload
+      // itself never carries: a server-generated id, and column defaults
+      // (created_at timestamptz default now() is on almost every table
+      // here) -- and tracks exactly which rows this call inserted, so a
+      // chained .select().single() returns the new row, not an arbitrary
+      // one off the front of the whole table
+      insert(v) {
+        const arr = Array.isArray(v) ? v : [v];
+        DB.__seq = DB.__seq || 0;
+        inserted = arr.map(r => Object.assign({ id: table + "_new" + (++DB.__seq), created_at: new Date().toISOString() }, r));
+        inserted.forEach(r => DB[table].push(r));
+        return api;
+      },
       update(patch) { filters.__patch = patch; return api; },
       upsert() { return api; },
       delete() { filters.__del = true; return api; },
       then(res) {
-        let out = rows().filter(r => filters.every(f => f(r)));
+        let out = (inserted || rows()).filter(r => filters.every(f => f(r)));
         if (filters.__patch) out.forEach(r => Object.assign(r, filters.__patch));
+        if (filters.__del) DB[table] = (DB[table] || []).filter(r => !out.includes(r));
         if (limit) out = out.slice(0, limit);
         if (head || wantCount) return res({ data: null, count: out.length, error: null });
         if (single || maybe) return res({ data: out[0] || null, error: out[0] || maybe ? null : { message: "no rows" } });
@@ -511,6 +535,41 @@ async function runRole(roleName, userId, empty) {
     try { await w.eval("exportInvoices()"); await new Promise(r => setTimeout(r, 120)); }
     catch (e) { exported = false; }
     check("CSV export runs", exported);
+
+    // --- load-more: the one generic handler every paginated list shares ---
+    await w.eval('state.financialInvoicesLimit = 12;');
+    await w.eval('ACTIONS["load-more"]({ dataset: { key: "financialInvoicesLimit", step: "12" } });');
+    await new Promise(r => setTimeout(r, 60));
+    check("load-more bumps the matching state limit and re-renders without error", w.eval("state.financialInvoicesLimit") === 24);
+
+    // --- announcements: targeting shown, create with a class target, delete ---
+    w.location.hash = "#/announcements"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    let annTxt = w.document.querySelector("#view").textContent;
+    check("untargeted announcement reads as sent to everyone", /Welcome back/.test(annTxt) && /Sent to every family/.test(annTxt));
+    check("class-targeted announcement names the class", /Sent to Sec 3 G3 A-Math/.test(annTxt));
+    w.document.querySelector('[data-act="announcement-edit"]').click();
+    await new Promise(r => setTimeout(r, 100));
+    const annCountBefore = DB.announcements.length;
+    w.document.querySelector("#f_title").value = "Term break notice";
+    w.document.querySelector("#f_body").value = "No lessons next Friday for the school holiday.";
+    const clsBox = w.document.querySelector('input[name="cls_cl1"]');
+    if (clsBox) clsBox.checked = true;
+    w.document.querySelector('[data-act="modal-save"]').click();
+    await new Promise(r => setTimeout(r, 120));
+    check("new announcement saved", DB.announcements.length === annCountBefore + 1 && !w.document.querySelector(".modal"));
+    annTxt = w.document.querySelector("#view").textContent;
+    check("new announcement appears in the list", /Term break notice/.test(annTxt));
+
+    const delBtn = w.document.querySelector('[data-act="announcement-delete"][data-id="an1"]');
+    check("delete button renders on an announcement", !!delBtn);
+    if (delBtn) {
+      delBtn.click();
+      await new Promise(r => setTimeout(r, 80));
+      check("delete asks for confirmation first", !!w.document.querySelector(".modal"));
+      w.document.querySelector('[data-act="modal-save"]').click();
+      await new Promise(r => setTimeout(r, 100));
+      check("confirming removes the announcement", !DB.announcements.some(a => a.id === "an1"));
+    }
   }
   if (roleName === "tutor" && !empty) {
     w.location.hash = "#/students"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
@@ -593,6 +652,16 @@ async function runRole(roleName, userId, empty) {
     await new Promise(r => setTimeout(r, 80));
   }
   if (roleName === "parent" && !empty) {
+    // --- announcements: banner on Overview, full list on its own page ---
+    w.location.hash = "#/overview"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    let povTxt = w.document.querySelector("#view").textContent;
+    check("Overview shows an announcements banner", /Announcements/.test(povTxt) && /Welcome back/.test(povTxt));
+    w.location.hash = "#/announcements"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    const pAnnTxt = w.document.querySelector("#view").textContent;
+    check("Announcements page lists what's been posted", /Welcome back/.test(pAnnTxt) && /A-Math class change/.test(pAnnTxt));
+    check("no admin controls (Edit/Delete/New) leak into the family view",
+      !w.document.querySelector('[data-act="announcement-edit"], [data-act="announcement-delete"]'));
+
     w.location.hash = "#/book"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
     const btxt = w.document.querySelector("#view").textContent;
     check("open fixed class with a spare seat shows up in Book a slot", /Sec 3 G3 A-Math \(Fri\)/.test(btxt));
@@ -679,6 +748,14 @@ async function runRole(roleName, userId, empty) {
         /on the right side of the curve/.test(w.document.querySelector("#printdoc").textContent));
       w.document.querySelector('[data-act="close-print"]').click();
     }
+  }
+  if (roleName === "student" && !empty) {
+    // --- announcements: same shared views as parent, wired through STUDENT.* ---
+    w.location.hash = "#/overview"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    check("My week shows an announcements banner", /Announcements/.test(w.document.querySelector("#view").textContent));
+    w.location.hash = "#/announcements"; await w.eval("render()"); await new Promise(r => setTimeout(r, 80));
+    check("student Announcements page lists what's been posted",
+      /Welcome back/.test(w.document.querySelector("#view").textContent));
   }
   dom.window.close();
   return { results, errors, modals, checks };

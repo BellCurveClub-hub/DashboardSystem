@@ -180,7 +180,11 @@ rows offering tel/sms contact links and a recent-actions feed
 (see below) · a second Edge Function sends invoice, reminder and
 low-credit email through Brevo, manual-trigger only (see below) · a
 public landing page at the bare URL, with sign-in moved behind a
-"Log in" link rather than being the first thing anyone sees (see below).
+"Log in" link rather than being the first thing anyone sees (see below) ·
+announcements to parents, optionally targeted to specific classes, shown
+as a banner on Overview and in full on their own page (see below) · a
+"Load more" control on the admin lists and the Overview recent-actions
+feed that used to cut off at a fixed number (see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -648,14 +652,68 @@ the existing auth gate (pre-selecting the right tab), anything else
 - The contact section's `mailto:hello@bellcurveclub.com` is a placeholder
   address, flagged as such — there was no real inbox to confirm.
 
+**Announcements to parents.** A centre-wide notice board — `announcements`
+(title, body, `created_by`) plus `announcement_classes`, a join table that
+targets one or more classes. No target rows at all means every family sees
+it; at least one means only a family with a student actively enrolled in
+one of those classes does.
+
+- Matching happens entirely in RLS, not client code: `announcements`' own
+  `p_read` policy does the "untargeted, or my student is actively enrolled
+  in a targeted class" check itself (via `enrolments`/`my_student_ids()`),
+  so `familyAnnouncements()` is a plain unfiltered `sel()` — same pattern
+  as `PARENT.overview`'s own unfiltered `invoices` fetch already used.
+  `announcement_classes` carries no sensitive data (just two ids), so it's
+  readable by any signed-in user — a family's client never needs to read
+  it directly (the server-side match handles targeting), but the admin
+  form does, to show and edit the current target list.
+- Admin manages them from a new **Announcements** page (`ADMIN.announcements`
+  / `announcementForm`) — a title, a body, and a checkbox per class to
+  target; leaving every box unticked sends to everyone. Saving diffs the
+  checked set against the existing `announcement_classes` rows rather than
+  clearing and re-inserting everything, the same shape the lesson-report
+  topic-grade save already uses.
+- Families see it two ways: the 3 most recent as a card on Overview
+  (`announcementsBannerHTML`, shared by `PARENT.overview` and
+  `STUDENT.overview`), and the full history on its own **Announcements**
+  page (`familyAnnouncementsPage`, shared by both roles via `PARENT.
+  announcements`/`STUDENT.announcements`). No read/unread tracking yet —
+  that's part of the in-app notification centre, still on the list below.
+- Tutors aren't a target audience for this (the ask was specifically
+  "to parents") — no nav entry for them, and RLS only special-cases
+  `is_admin()`, not `is_staff()`.
+
+**"Load more" on lists that used to cut off.** Overview's Financial tab
+(recent invoices), Booking requests (confirmed bookings, declined/
+cancelled/waitlisted, past lesson requests) and Overview's recent-actions
+feed all used to hard-cap at a fixed number with no way to see further
+back. Each now tracks its own limit in `state` (e.g. `state.
+financialInvoicesLimit`) and grows it by a fixed step through one shared
+handler, `ACTIONS["load-more"]`, keyed off `data-key`/`data-step` on the
+button — the same generic control renders everywhere via `loadMoreHTML()`.
+
+- Where the full set is already fetched client-side (Financial's
+  `invoices`), "more to show" is exact — the true count is right there.
+  Where a list is itself fed by a capped DB query (`ADMIN.bookings`,
+  `recentActionsHTML`'s seven unioned tables), the query's own `.limit()`
+  grows alongside the display limit, and "there might be more" is a
+  heuristic (the fetch returned a full page) rather than a true count —
+  cheap, and right in every case that matters here.
+- Deliberately not real pagination (page numbers, Prev/Next) — a plain
+  "show more of what I've already got, or fetch further back" button
+  fits this app's existing list style better and needed no new UI pattern.
+- The urgent, never-capped lists (booking requests still waiting for a
+  decision, pending custom lesson requests) were left alone on purpose —
+  those should always show in full, not hide behind a click.
+
 **Next, in order:**
 
 1. Term and holiday calendar — decided: a marked holiday blocks families from
    booking any slot on that date (including ad-hoc bookable ones), not just
    suppress auto-generation of recurring sessions.
-2. Announcements to parents
-3. Notification centre (in-app), and turning the email sender (built,
-   manual-trigger only — see below) into something automatic/scheduled
+2. Notification centre (in-app), read/unread tracking for announcements,
+   and turning the email sender (built, manual-trigger only — see below)
+   into something automatic/scheduled
 
 **Deferred on purpose — do not build until asked:**
 

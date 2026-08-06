@@ -2275,6 +2275,63 @@ begin
   end if;
   delete from absence_reports where id = p_report;
 end $$;
+
+-- ===========================================================================
+-- PART 11 — Announcements to parents
+-- Added after the first release. Safe to run on an existing database.
+--
+-- A centre-wide notice board. An admin writes one; by default every family
+-- sees it. Optionally aimed at one or more classes via announcement_classes
+-- -- when at least one row exists for an announcement, only a family with a
+-- student actively enrolled in one of those classes sees it. announcement_
+-- classes has no sensitive content (just an announcement id and a class id),
+-- so any signed-in user can read it -- the actual filtering is enforced on
+-- announcements itself, below. No read/unread tracking yet -- that belongs
+-- to the in-app notification centre, a separate deferred item.
+-- ===========================================================================
+create table if not exists announcements (
+  id         uuid primary key default gen_random_uuid(),
+  title      text not null,
+  body       text not null,
+  created_by uuid references profiles(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists announcements_created_idx on announcements(created_at desc);
+
+create table if not exists announcement_classes (
+  id              uuid primary key default gen_random_uuid(),
+  announcement_id uuid not null references announcements(id) on delete cascade,
+  class_id        uuid not null references classes(id) on delete cascade,
+  unique (announcement_id, class_id)
+);
+
+alter table announcements enable row level security;
+alter table announcement_classes enable row level security;
+drop policy if exists p_read on announcements;
+drop policy if exists p_ins  on announcements;
+drop policy if exists p_upd  on announcements;
+drop policy if exists p_del  on announcements;
+drop policy if exists p_read on announcement_classes;
+drop policy if exists p_write on announcement_classes;
+
+-- an admin sees everything; a family sees an untargeted (centre-wide)
+-- announcement, or a targeted one where one of their own students is
+-- actively enrolled in a targeted class
+create policy p_read on announcements for select using (
+  is_admin() or
+  not exists (select 1 from announcement_classes ac where ac.announcement_id = announcements.id) or
+  exists (
+    select 1 from announcement_classes ac
+    join enrolments e on e.class_id = ac.class_id and e.status = 'active'
+    where ac.announcement_id = announcements.id and e.student_id in (select my_student_ids())
+  )
+);
+create policy p_ins on announcements for insert with check (is_admin());
+create policy p_upd on announcements for update using (is_admin()) with check (is_admin());
+create policy p_del on announcements for delete using (is_admin());
+
+create policy p_read  on announcement_classes for select using (auth.uid() is not null);
+create policy p_write on announcement_classes for all using (is_admin()) with check (is_admin());
 `;
 
 /* ============================================================================
@@ -2655,6 +2712,14 @@ const state = {
   phoneCodeSent: false,
   progressSubject: "all",
   pendingConfirmEmail: null,
+  // "load more" caps for lists that would otherwise run long — bumped by
+  // the load-more action, never reset until the next full page load
+  financialInvoicesLimit: 12,
+  bookingsConfirmedLimit: 60,
+  bookingsOtherLimit: 40,
+  lessonRequestsPastLimit: 30,
+  recentActionsLimit: 12,
+  announcementsLimit: 20,
 };
 
 /* ---------------------------------------------------------------- helpers -- */
@@ -2815,6 +2880,16 @@ function emptyState(iconTxt, title, line) {
   return '<div class="empty"><div class="big">' + iconTxt + "</div><h4>" + esc(title) + "</h4><p>" + esc(line || "") + "</p></div>";
 }
 
+// a plain "show more of what's already loaded, or fetch a bigger page next
+// time" control for lists that would otherwise cut off at a fixed number.
+// hasMore is a heuristic (the shown count met the current cap) rather than
+// a real total — cheap, and right in every case that matters here.
+function loadMoreHTML(key, step, hasMore) {
+  if (!hasMore) return "";
+  return '<div style="text-align:center;margin-top:12px">' +
+    '<button class="btn btn-ghost btn-sm" data-act="load-more" data-key="' + esc(key) + '" data-step="' + step + '">Load more</button></div>';
+}
+
 /* --------------------------------------------------------- credit strip UI -- */
 /* The signature element: a prepaid balance drawn as physical lesson tickets. */
 function creditStrip(credits, capacity) {
@@ -2924,6 +2999,7 @@ const NAV = {
     { r: "schedule",   t: "Schedule",     i: "▦" },
     { r: "bookings",   t: "Booking requests", i: "✎", count: "bookings" },
     { r: "attendance", t: "Attendance",   i: "✓" },
+    { r: "announcements", t: "Announcements", i: "▣" },
     { g: "My teaching" },
     { r: "teaching",     t: "Today (mine)",  i: "◱" },
     { r: "myschedule",   t: "My schedule",   i: "▦" },
@@ -2968,6 +3044,7 @@ const NAV = {
     { r: "billing",  t: "Fees & invoices", i: "$" },
     { r: "progress", t: "Progress",  i: "▲" },
     { r: "results",  t: "Test results", i: "◎" },
+    { r: "announcements", t: "Announcements", i: "▣" },
     { r: "account",  t: "My account", i: "⚙" },
   ],
   student: [
@@ -2978,6 +3055,7 @@ const NAV = {
     { r: "progress", t: "My progress", i: "▲" },
     { r: "results",  t: "Test results", i: "◎" },
     { r: "rewards",  t: "Gift shelf", i: "★" },
+    { r: "announcements", t: "Announcements", i: "▣" },
     { r: "account",  t: "My account", i: "⚙" },
   ],
   pending_tutor: [
@@ -3574,14 +3652,15 @@ async function overviewAttentionTab() {
 // audit log. Good enough to see "what just happened"; a real audit table
 // is a bigger step to take only if this turns out not to be enough
 async function recentActionsHTML(smap) {
+  const fetchLimit = state.recentActionsLimit + 3;
   const [credits, points, invoices, bookings, redemptions, attendance, reports, rewards, classesAll] = await Promise.all([
-    sel("credit_ledger", q => q.order("created_at", { ascending: false }).limit(15)),
-    sel("points_ledger", q => q.order("created_at", { ascending: false }).limit(15)),
-    sel("invoices", q => q.order("issued_at", { ascending: false }).limit(15)),
-    sel("bookings", q => q.order("created_at", { ascending: false }).limit(15)),
-    sel("redemptions", q => q.order("requested_at", { ascending: false }).limit(15)),
-    sel("attendance", q => q.order("marked_at", { ascending: false }).limit(15)),
-    sel("absence_reports", q => q.order("reported_at", { ascending: false }).limit(15)),
+    sel("credit_ledger", q => q.order("created_at", { ascending: false }).limit(fetchLimit)),
+    sel("points_ledger", q => q.order("created_at", { ascending: false }).limit(fetchLimit)),
+    sel("invoices", q => q.order("issued_at", { ascending: false }).limit(fetchLimit)),
+    sel("bookings", q => q.order("created_at", { ascending: false }).limit(fetchLimit)),
+    sel("redemptions", q => q.order("requested_at", { ascending: false }).limit(fetchLimit)),
+    sel("attendance", q => q.order("marked_at", { ascending: false }).limit(fetchLimit)),
+    sel("absence_reports", q => q.order("reported_at", { ascending: false }).limit(fetchLimit)),
     sel("rewards"), sel("classes"),
   ]);
   const rmap = byId(rewards), cmap = byId(classesAll);
@@ -3599,10 +3678,14 @@ async function recentActionsHTML(smap) {
     " for " + esc(nameOf(cmap, a.class_id, "a class")) }));
   reports.forEach(r => items.push({ when: r.reported_at, text: esc(nameOf(smap, r.student_id)) + " reported an absence" }));
 
-  const top = items.filter(x => x.when).sort((a, b) => b.when.localeCompare(a.when)).slice(0, 12);
+  const dated = items.filter(x => x.when).sort((a, b) => b.when.localeCompare(a.when));
+  const top = dated.slice(0, state.recentActionsLimit);
   if (!top.length) return emptyState("◷", "Nothing yet", "Actions across the centre show up here as they happen.");
+  const anyTableFull = [credits, points, invoices, bookings, redemptions, attendance, reports].some(arr => arr.length >= fetchLimit);
+  const hasMore = dated.length > top.length || anyTableFull;
   return "<ul style='margin:0;padding-left:18px;line-height:2'>" +
-    top.map(x => "<li>" + x.text + " <span class='hint'>" + esc(fmtDate(x.when.slice(0, 10))) + "</span></li>").join("") + "</ul>";
+    top.map(x => "<li>" + x.text + " <span class='hint'>" + esc(fmtDate(x.when.slice(0, 10))) + "</span></li>").join("") + "</ul>" +
+    loadMoreHTML("recentActionsLimit", 12, hasMore);
 }
 
 async function overviewFinancialTab() {
@@ -3628,14 +3711,16 @@ async function overviewFinancialTab() {
       '<div class="stat"><div class="k">Avg. credits held</div><div class="v">' + avgCredits.toFixed(1) + '</div><div class="n">per active student</div></div>' +
     "</div>";
 
-  const recentInvoices = invoices.slice().sort((a, b) => (b.issued_at || "").localeCompare(a.issued_at || "")).slice(0, 12);
+  const sortedInvoices = invoices.slice().sort((a, b) => (b.issued_at || "").localeCompare(a.issued_at || ""));
+  const recentInvoices = sortedInvoices.slice(0, state.financialInvoicesLimit);
   const rows = recentInvoices.map(i => "<tr><td>" + esc(i.invoice_no) + "</td><td>" + esc(nameOf(smap, i.student_id)) + "</td>" +
     "<td>" + esc(fmtDate(i.issued_at)) + "</td><td><span class='pill " + invPill(i) + "'>" + esc(i.status) + "</span></td>" +
     '<td class="num money">' + money(i.amount_cents) + "</td>" +
     '<td class="act">' + (i.status === "sent" ? sendEmailButtonHTML("invoice", i.id, "Send") : "") + "</td></tr>");
 
   return stats + card("Recent invoices", rows.length
-    ? table(["Invoice", "Student", "Issued", "Status", { t: "Amount", num: true }, ""], rows)
+    ? table(["Invoice", "Student", "Issued", "Status", { t: "Amount", num: true }, ""], rows) +
+      loadMoreHTML("financialInvoicesLimit", 12, sortedInvoices.length > recentInvoices.length)
     : emptyState("$", "No invoices yet", ""), "", true);
 }
 
@@ -3924,10 +4009,13 @@ async function scheduleLessonRequest(requestId) {
 
 /* ------------------------------------------------------------- BOOKINGS ---- */
 ADMIN.bookings = async function (view) {
-  const bookings = await sel("bookings", q => q.order("created_at", { ascending: false }).limit(200));
+  // "Waiting for a decision" is never capped (it's the urgent list); the two
+  // paginated groups below share this fetch, so its limit grows with them
+  const bookings = await sel("bookings", q => q.order("created_at", { ascending: false })
+    .limit(state.bookingsConfirmedLimit + state.bookingsOtherLimit + 200));
   const [students, sessions, classes, lessonRequests, subjects] = await Promise.all([
     sel("students"), sel("sessions"), sel("classes"),
-    sel("lesson_requests", q => q.order("created_at", { ascending: false }).limit(100)),
+    sel("lesson_requests", q => q.order("created_at", { ascending: false }).limit(state.lessonRequestsPastLimit + 100)),
     sel("subjects"),
   ]);
   const smap = byId(students), semap = byId(sessions), cmap = byId(classes), subjmap = byId(subjects);
@@ -3976,12 +4064,15 @@ ADMIN.bookings = async function (view) {
       grp.requested.length ? table(["Student", "Slot", "Note", "Status", ""], grp.requested.map(b => rowFor(b, true)))
                            : emptyState("✓", "Nothing waiting", "New requests appear here as families make them."), "", true) +
     card("Confirmed", grp.confirmed.length
-      ? table(["Student", "Slot", "Note", "Status", ""], grp.confirmed.slice(0, 60).map(b => rowFor(b, false)))
+      ? table(["Student", "Slot", "Note", "Status", ""], grp.confirmed.slice(0, state.bookingsConfirmedLimit).map(b => rowFor(b, false))) +
+        loadMoreHTML("bookingsConfirmedLimit", 60, grp.confirmed.length > state.bookingsConfirmedLimit)
       : emptyState("▦", "No confirmed bookings yet", ""), "", true) +
     (grp.other.length ? card("Declined, cancelled and waitlisted",
-      table(["Student", "Slot", "Note", "Status", ""], grp.other.slice(0, 40).map(b => rowFor(b, false))), "", true) : "") +
+      table(["Student", "Slot", "Note", "Status", ""], grp.other.slice(0, state.bookingsOtherLimit).map(b => rowFor(b, false))) +
+      loadMoreHTML("bookingsOtherLimit", 40, grp.other.length > state.bookingsOtherLimit), "", true) : "") +
     (decidedRequests.length ? card("Past lesson requests",
-      table(["Student", "Subject", "Requested", "Note", "Status", ""], decidedRequests.slice(0, 30).map(r => requestRow(r, false))), "", true) : "");
+      table(["Student", "Subject", "Requested", "Note", "Status", ""], decidedRequests.slice(0, state.lessonRequestsPastLimit).map(r => requestRow(r, false))) +
+      loadMoreHTML("lessonRequestsPastLimit", 30, decidedRequests.length > state.lessonRequestsPastLimit), "", true) : "");
 };
 
 /* ----------------------------------------------------------- ATTENDANCE ---- */
@@ -4153,6 +4244,99 @@ async function attendanceSheet(sessionId) {
   // lets the toggle-topic-covered click handler regenerate just the grid,
   // without wiping whatever's already typed elsewhere in the modal
   $("#modal-host").__renderTopicGrid = renderTopicGrid;
+}
+
+/* --------------------------------------------------------- ANNOUNCEMENTS ---- */
+ADMIN.announcements = async function (view) {
+  const [anns, links, classes] = await Promise.all([
+    sel("announcements", q => q.order("created_at", { ascending: false }).limit(state.announcementsLimit)),
+    sel("announcement_classes"), sel("classes", q => q.order("name")),
+  ]);
+  const cmap = byId(classes);
+  const targetsFor = id => links.filter(l => l.announcement_id === id).map(l => cmap[l.class_id]).filter(Boolean);
+
+  const rows = anns.map(a => {
+    const targets = targetsFor(a.id);
+    return card(a.title,
+      "<p class='hint' style='margin:0 0 8px'>" + esc(fmtDate(a.created_at.slice(0, 10))) + " · " +
+        (targets.length ? "Sent to " + targets.map(c => esc(c.name)).join(", ") : "Sent to every family") + "</p>" +
+      "<p style='margin:0;white-space:pre-wrap'>" + esc(a.body) + "</p>",
+      '<button class="btn btn-sm btn-ghost" data-act="announcement-edit" data-id="' + a.id + '">Edit</button> ' +
+      '<button class="btn btn-sm btn-danger" data-act="announcement-delete" data-id="' + a.id + '">Delete</button>', true);
+  }).join("");
+
+  view.innerHTML =
+    pageHead("Announcements", "Post a notice families see on their overview and on their Announcements page",
+      '<button class="btn btn-primary" data-act="announcement-edit">New announcement</button>') +
+    (anns.length ? rows + loadMoreHTML("announcementsLimit", 20, anns.length >= state.announcementsLimit)
+      : card("", emptyState("▣", "Nothing posted yet", "Write your first announcement for families.")));
+};
+
+async function announcementForm(id) {
+  const a = id ? (await sel("announcements", q => q.eq("id", id)))[0] : null;
+  const [links, classes] = await Promise.all([
+    id ? sel("announcement_classes", q => q.eq("announcement_id", id)) : [],
+    sel("classes", q => q.order("name")),
+  ]);
+  const targeted = new Set(links.map(l => l.class_id));
+
+  openModal({
+    title: a ? "Edit announcement" : "New announcement",
+    wide: true,
+    body:
+      fText("title", "Title", a ? a.title : "", { required: true }) +
+      fArea("body", "Message", a ? a.body : "") +
+      '<div class="field"><label>Send to</label>' +
+      '<div class="hint" style="margin-bottom:6px">Leave every class unticked to send to every family. Tick one or more to only notify families with a student in them.</div>' +
+      '<div>' + (classes.length
+        ? classes.map(c => '<label class="check" style="display:block"><input type="checkbox" name="cls_' + c.id + '"' +
+            (targeted.has(c.id) ? " checked" : "") + "> " + esc(c.name) + "</label>").join("")
+        : "<p class='hint'>No classes yet.</p>") +
+      "</div></div>",
+    onSave: async () => {
+      const v = modalValues();
+      const title = (v.title || "").trim(), body = (v.body || "").trim();
+      if (!title) return toast("Give the announcement a title.", "bad");
+      if (!body) return toast("Write a message.", "bad");
+      const wantIds = new Set(classes.filter(c => v["cls_" + c.id]).map(c => c.id));
+      try {
+        let annId = a ? a.id : null;
+        if (a) await upd("announcements", a.id, { title, body });
+        else { const created = await ins("announcements", { title, body, created_by: state.user.id }); annId = created.id; }
+        for (const l of links) if (!wantIds.has(l.class_id)) await del("announcement_classes", l.id);
+        const already = new Set(links.filter(l => wantIds.has(l.class_id)).map(l => l.class_id));
+        for (const cid of wantIds) if (!already.has(cid)) await ins("announcement_classes", { announcement_id: annId, class_id: cid });
+        closeModal(); toast("Announcement saved.", "ok"); render();
+      } catch (e) { fail(e); }
+    },
+  });
+}
+
+// shared by parent and student — RLS on announcements already filters to
+// what this family is allowed to see (centre-wide, or one of their active
+// enrolments' classes), so this is a plain fetch with no client-side
+// targeting logic
+async function familyAnnouncements(limit) {
+  return sel("announcements", q => q.order("created_at", { ascending: false }).limit(limit));
+}
+function announcementsBannerHTML(anns) {
+  if (!anns.length) return "";
+  return card("Announcements",
+    anns.slice(0, 3).map(a =>
+      "<div style='margin-bottom:14px'><div style='display:flex;justify-content:space-between;gap:10px'><b>" + esc(a.title) +
+      "</b><span class='hint'>" + esc(fmtDate(a.created_at.slice(0, 10))) + "</span></div>" +
+      "<p style='margin:4px 0 0;white-space:pre-wrap'>" + esc(a.body) + "</p></div>").join("") +
+    (anns.length > 3 ? '<a href="#/announcements">See all announcements</a>' : ""), "", true);
+}
+async function familyAnnouncementsPage(view) {
+  const anns = await familyAnnouncements(state.announcementsLimit);
+  view.innerHTML =
+    pageHead("Announcements", "Notices from the centre") +
+    (anns.length
+      ? anns.map(a => card(a.title, "<p class='hint' style='margin:0 0 8px'>" + esc(fmtDate(a.created_at.slice(0, 10))) + "</p>" +
+          "<p style='margin:0;white-space:pre-wrap'>" + esc(a.body) + "</p>", "", true)).join("") +
+        loadMoreHTML("announcementsLimit", 20, anns.length >= state.announcementsLimit)
+      : card("", emptyState("▣", "Nothing yet", "Notices from the centre appear here.")));
 }
 
 /* ============================================================================
@@ -5259,10 +5443,11 @@ function sessionCards(list, classes, showActions, studentId) {
 /* --------------------------------------------------------- PARENT: overview -- */
 PARENT.overview = async function (view) {
   if (!state.students.length) return noStudentYet(view);
-  const [classes, invoices, levels] = await Promise.all([
+  const [classes, invoices, levels, announcements] = await Promise.all([
     sel("classes"),
     sel("invoices", q => q.in("status", ["sent", "draft"]).order("due_at")),
     sel("levels"),
+    familyAnnouncements(3),
   ]);
   const lvMap = byId(levels);
 
@@ -5292,8 +5477,11 @@ PARENT.overview = async function (view) {
     pageHead("Overview", "Everything for your " + (state.students.length > 1 ? "children" : "child") + " in one place") +
     (owed ? '<div class="note hl"><b>' + money(owed) + " outstanding</b> across " + due.length +
       ' invoice' + (due.length > 1 ? "s" : "") + '. <a href="#/billing">Pay now</a></div>' : "") +
+    announcementsBannerHTML(announcements) +
     '<div class="cols cols-2">' + blocks.join("") + "</div>";
 };
+
+PARENT.announcements = familyAnnouncementsPage;
 
 /* --------------------------------------------------------- PARENT: schedule -- */
 PARENT.schedule = async function (view) {
@@ -5633,15 +5821,17 @@ STUDENT.overview = async function (view) {
   if (!state.students.length) return noStudentYet(view);
   const s = currentStudent();
   const classes = await sel("classes");
-  const [upcoming, hw] = await Promise.all([
+  const [upcoming, hw, announcements] = await Promise.all([
     studentSessions(s.id, today(), addDays(today(), 7)),
     sel("homework", q => q.eq("student_id", s.id).in("status", ["assigned", "submitted"]).order("due_at")),
+    familyAnnouncements(3),
   ]);
   const cmap = byId(classes);
   const dueSoon = hw.filter(h => h.status === "assigned");
 
   view.innerHTML =
     pageHead("My week", "Hello " + (state.profile.full_name || s.full_name).split(" ")[0]) +
+    announcementsBannerHTML(announcements) +
     '<div class="cols cols-3" style="margin-bottom:18px">' +
       '<div class="stat"><div class="k">Lessons left</div><div class="v">' + s.credits + '</div><div class="n">on your prepaid package</div></div>' +
       '<div class="stat"><div class="k">Points</div><div class="v">' + s.points + '</div><div class="n">spend them on the gift shelf</div></div>' +
@@ -5659,6 +5849,7 @@ STUDENT.overview = async function (view) {
 };
 
 STUDENT.schedule = PARENT.schedule;
+STUDENT.announcements = familyAnnouncementsPage;
 
 /* -------------------------------------------------------- STUDENT: homework -- */
 STUDENT.homework = async function (view) {
@@ -6608,6 +6799,13 @@ const ACTIONS = {
   },
   "modal-save": () => { const f = $("#modal-host").__onsave; if (f) f(); },
 
+  /* ---- lists that load more on demand ----------------------------------- */
+  "load-more": el => {
+    const key = el.dataset.key, step = Number(el.dataset.step) || 12;
+    state[key] = (state[key] || step) + step;
+    render();
+  },
+
   /* ---- overview --------------------------------------------------------- */
   "overview-tab": el => { state.overviewTab = el.dataset.v; render(); },
   "toggle-attn": el => {
@@ -6902,6 +7100,12 @@ const ACTIONS = {
     });
   },
   "reward-edit": el => rewardForm(el.dataset.id || null),
+  "announcement-edit": el => announcementForm(el.dataset.id || null),
+  "announcement-delete": async el => {
+    if (!(await confirmBox("Delete this announcement?", "Families will no longer see it. This can't be undone.", true))) return;
+    try { await del("announcements", el.dataset.id); toast("Announcement deleted.", "ok"); render(); }
+    catch (e) { fail(e); }
+  },
   "red-set": async el => {
     try { await upd("redemptions", el.dataset.id, { status: el.dataset.v, handled_by: state.user.id });
       toast("Updated.", "ok"); render(); }
