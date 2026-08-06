@@ -118,6 +118,71 @@ button,input,select,textarea{font:inherit;color:inherit}
   font-size:13.5px; font-weight:600; color:var(--ink-soft); cursor:pointer;
 }
 .tabs-seg button[aria-selected="true"]{background:var(--paper); color:var(--ink-800); box-shadow:var(--shadow-sm)}
+.gate-back{
+  display:block; padding:14px 28px 0; font-size:13px; font-weight:600;
+  color:var(--ink-soft); text-decoration:none;
+}
+.gate-back:hover{color:var(--mint-600)}
+
+/* ============================================================
+   LANDING PAGE
+   What a signed-out visitor sees first — brand, offer, and a way in.
+   ============================================================ */
+.land{background:var(--paper); color:var(--ink)}
+.land-nav{
+  position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between;
+  gap:16px; padding:16px clamp(20px,5vw,64px); background:var(--paper); border-bottom:1px solid var(--line);
+}
+.land-brand{display:flex; align-items:center; gap:10px; text-decoration:none; color:inherit}
+.land-hero{
+  display:grid; grid-template-columns:1.1fr .9fr; gap:48px; align-items:center;
+  padding:clamp(40px,7vw,88px) clamp(20px,5vw,64px); max-width:1180px; margin:0 auto;
+  background:
+    radial-gradient(900px 420px at 100% -10%, var(--mint-100) 0%, transparent 60%),
+    radial-gradient(700px 380px at -5% 110%, var(--hl-100) 0%, transparent 60%);
+}
+.land-eyebrow{
+  font-size:12px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--mint-600); margin-bottom:10px;
+}
+.land-hero h1{
+  font-family:var(--display); font-weight:800; font-size:clamp(34px,5vw,54px); line-height:1.08;
+  letter-spacing:-.02em; color:var(--ink-800); margin-bottom:16px;
+}
+.land-lede{font-size:16.5px; line-height:1.6; color:var(--ink-soft); max-width:46ch; margin-bottom:26px}
+.land-cta{padding:13px 22px; font-size:15px}
+.land-hero-art{display:flex; align-items:center; justify-content:center}
+.land-hero-art .brandmark{
+  width:min(340px,80%); height:auto; background:transparent; padding:0; filter:drop-shadow(0 18px 34px rgba(35,44,69,.14));
+}
+.land-section{padding:clamp(40px,6vw,72px) clamp(20px,5vw,64px); max-width:1180px; margin:0 auto}
+.land-section.land-alt{background:var(--cream); max-width:none; padding-left:0; padding-right:0}
+.land-section.land-alt > *{max-width:1180px; margin-left:auto; margin-right:auto; padding-left:clamp(20px,5vw,64px); padding-right:clamp(20px,5vw,64px)}
+.land-section h2{
+  font-family:var(--display); font-weight:800; font-size:clamp(24px,3vw,32px);
+  color:var(--ink-800); letter-spacing:-.01em; margin-bottom:8px;
+}
+.land-sub{font-size:15px; color:var(--ink-soft); max-width:60ch; margin-bottom:28px}
+.land-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-top:20px}
+.land-card{background:var(--paper); border:1px solid var(--line); border-radius:var(--r); padding:20px; box-shadow:var(--shadow-sm)}
+.land-card i{display:block; width:32px; height:5px; border-radius:999px; margin-bottom:14px}
+.land-card h3{font-family:var(--display); font-size:16px; font-weight:700; color:var(--ink-800); margin-bottom:6px}
+.land-card p{font-size:13.5px; line-height:1.55; color:var(--ink-soft); margin:0}
+#land-contact{text-align:center}
+#land-contact .land-sub{margin-left:auto; margin-right:auto}
+#land-contact .btn-row{justify-content:center}
+.land-foot{
+  display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;
+  padding:22px clamp(20px,5vw,64px); border-top:1px solid var(--line); font-size:12.5px; color:var(--ink-faint);
+}
+.land-foot .brandmark{width:32px; height:24px}
+@media (max-width:820px){
+  .land-hero{grid-template-columns:1fr; text-align:center}
+  .land-lede{margin-left:auto; margin-right:auto}
+  .land-hero .btn-row{justify-content:center}
+  .land-hero-art{order:-1}
+  .land-hero-art .brandmark{width:min(260px,70%)}
+}
 
 /* ============================================================
    FORMS
@@ -2974,6 +3039,81 @@ function brandMark(sub, onDark) {
     '<div class="brand-sub' + (sub ? "" : " tag") + '">' + esc(line) + "</div></div>";
 }
 
+/* ------------------------------------------------------------- landing page -- */
+/* What a signed-out visitor sees at the bare URL — who the centre is, before
+   ever being asked to sign in. #/login and #/signup skip straight to the
+   existing auth gate; everything else (including no hash at all) lands here.
+   Static only, no DB calls — `settings`/`subjects` both require an
+   authenticated session under RLS, so this reads only the CONFIG fallbacks
+   already used elsewhere pre-login (see brandMark()), plus the fixed subject
+   list seeded by the schema. */
+const LANDING_SUBJECTS = [
+  { name: "Mathematics", colour: "#2EC4B6", blurb: "Building number sense and problem-solving from the fundamentals up." },
+  { name: "Additional Mathematics", colour: "#2E3A59", blurb: "The O-Level and IP syllabus, worked through until it's second nature." },
+  { name: "Science", colour: "#F2664B", blurb: "Physics, Chemistry and Biology concepts tied back to how exams actually ask them." },
+  { name: "English", colour: "#8B7BE8", blurb: "Comprehension, composition and oral confidence, at every level." },
+  { name: "Python Programming", colour: "#15968B", blurb: "A first real language for students curious about code, not just syntax drills." },
+];
+const LANDING_WHY = [
+  { t: "Credits that never expire", d: "Buy a package once — the lesson credits inside it are yours for as long as your child needs them, no deadline to race against." },
+  { t: "Progress you can actually see", d: "Every lesson, topic and test feeds a running picture of where your child is strong and where they need more time — visible to you, not just the tutor." },
+  { t: "Effort gets rewarded", d: "Students earn points for attending, handing in homework on time and doing well on tests — redeemable for real rewards, not just a line on a report card." },
+  { t: "Small classes, real attention", d: "We keep class sizes small on purpose, so a lesson is a conversation with your child, not a lecture at them." },
+];
+
+function renderLanding() {
+  const subjectCards = LANDING_SUBJECTS.map(s =>
+    '<div class="land-card"><i style="background:' + s.colour + '"></i>' +
+      '<h3>' + esc(s.name) + "</h3><p>" + esc(s.blurb) + "</p></div>").join("");
+  const whyCards = LANDING_WHY.map(w =>
+    '<div class="land-card"><h3>' + esc(w.t) + "</h3><p>" + esc(w.d) + "</p></div>").join("");
+
+  root().innerHTML =
+    '<div class="land">' +
+      '<header class="land-nav"><a class="land-brand" href="#/">' + brandMark() + "</a>" +
+        '<a class="btn btn-primary" href="#/login">Log in</a>' +
+      "</header>" +
+
+      '<section class="land-hero">' +
+        '<div class="land-hero-copy">' +
+          '<div class="land-eyebrow">' + esc(CONFIG.CENTRE_NAME) + " · Singapore</div>" +
+          "<h1>On the right side<br>of the curve.</h1>" +
+          "<p class='land-lede'>A tuition centre for Primary, Secondary and JC students, built around small " +
+          "classes, real progress tracking, and lesson credits that never expire.</p>" +
+          '<div class="btn-row">' +
+            '<button class="btn btn-mint land-cta" data-act="scroll-to" data-target="land-contact">Enquire about a trial lesson</button>' +
+            '<a class="btn btn-ghost land-cta" href="#/login">Already with us? Log in</a>' +
+          "</div>" +
+        "</div>" +
+        '<div class="land-hero-art">' + bccMark(false) + "</div>" +
+      "</section>" +
+
+      '<section class="land-section" id="land-offer">' +
+        "<h2>What we teach</h2>" +
+        "<p class='land-sub'>From Primary through JC, taught by tutors who know the syllabus and the student.</p>" +
+        '<div class="land-grid">' + subjectCards + "</div>" +
+      "</section>" +
+
+      '<section class="land-section land-alt" id="land-why">' +
+        "<h2>Why families choose us</h2>" +
+        '<div class="land-grid">' + whyCards + "</div>" +
+      "</section>" +
+
+      '<section class="land-section" id="land-contact">' +
+        "<h2>Ready to get started?</h2>" +
+        "<p class='land-sub'>Get in touch to ask about a trial lesson, or log in if your family is already with us.</p>" +
+        '<div class="btn-row">' +
+          '<a class="btn btn-mint land-cta" href="mailto:hello@bellcurveclub.com">Email us</a>' +
+          '<a class="btn btn-ghost land-cta" href="#/login">Log in</a>' +
+        "</div>" +
+      "</section>" +
+
+      '<footer class="land-foot"><div class="land-brand">' + brandMark() + "</div>" +
+        "<div>© " + new Date().getFullYear() + " " + esc(CONFIG.CENTRE_NAME) + "</div>" +
+      "</footer>" +
+    "</div>";
+}
+
 /* --------------------------------------------------- no keys configured yet -- */
 function renderConfigGate() {
   root().innerHTML =
@@ -2997,6 +3137,7 @@ function renderAuth() {
   const isIn = authTab === "in";
   root().innerHTML =
     '<div class="gate"><div class="gate-card">' +
+      '<a class="gate-back" href="#/">‹ Back to bellcurveclub.com</a>' +
       '<div class="gate-head"><div class="mark">' + brandMark() + "</div></div>" +
       '<div class="gate-body">' +
         '<div class="tabs-seg" role="tablist">' +
@@ -3132,7 +3273,12 @@ function table(headers, rows) {
 async function render() {
   if (!db) return renderConfigGate();
   if (!state.user && state.pendingConfirmEmail) return renderConfirmPending();
-  if (!state.user) return renderAuth();
+  if (!state.user) {
+    const h = location.hash;
+    if (h !== "#/login" && h !== "#/signup") return renderLanding();
+    authTab = h === "#/signup" ? "up" : "in";
+    return renderAuth();
+  }
   if (!state.profile) return renderNoProfile();
 
   state.route = currentRoute();
@@ -6451,6 +6597,7 @@ const ACTIONS = {
   /* ---- navigation ------------------------------------------------------ */
   nav: el => { $("#side") && $("#side").classList.remove("open"); go(el.dataset.route); },
   "toggle-side": () => $("#side").classList.toggle("open"),
+  "scroll-to": el => { const t = document.getElementById(el.dataset.target); if (t) t.scrollIntoView({ behavior: "smooth" }); },
   "pick-student": el => { state.activeStudent = el.dataset.id; render(); },
 
   /* ---- modal ----------------------------------------------------------- */

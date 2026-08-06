@@ -178,7 +178,9 @@ below) · the admin Overview is split into Needs attention (default),
 Financial and Today's lessons tabs, with expandable low-credit/overdue
 rows offering tel/sms contact links and a recent-actions feed
 (see below) · a second Edge Function sends invoice, reminder and
-low-credit email through Brevo, manual-trigger only (see below).
+low-credit email through Brevo, manual-trigger only (see below) · a
+public landing page at the bare URL, with sign-in moved behind a
+"Log in" link rather than being the first thing anyone sees (see below).
 
 **Lesson reports.** Folded into the existing "Mark the register" modal,
 since that's already the after-lesson touchpoint — no separate screen.
@@ -616,6 +618,35 @@ yet — see the deferred list below.
   that known shape rather than tested against a live Brevo account, since
   this project has no Brevo credentials to test with. Worth a real send
   once deployed, before relying on it.
+
+**Public landing page.** The bare URL used to go straight to the sign-in
+gate — no way for a family who's never heard of the centre to land
+anywhere and find out who it is first. `render()` now branches on the hash
+before checking `state.user` at all: `#/login`/`#/signup` skip straight to
+the existing auth gate (pre-selecting the right tab), anything else
+(including no hash) shows `renderLanding()`.
+
+- Fully static, no DB calls. `settings` and `subjects` both require
+  `auth.uid() is not null` under RLS, so a signed-out visitor can't read
+  either — the page uses the same `CONFIG.CENTRE_NAME`/`TAGLINE` fallbacks
+  `brandMark()` already falls back to pre-login, plus a fixed
+  `LANDING_SUBJECTS` list mirroring the schema's actual seeded subjects
+  (kept as a literal, not a live query, on purpose).
+- Reuses the existing brand pieces rather than inventing new ones:
+  `brandMark()`/`bccMark()` for the wordmark and generated curve mark (just
+  scaled up via `.land-hero-art .brandmark`), the same `--ink`/`--mint`/
+  `--hl`/`--coral` tokens, `.btn`/`.card`-adjacent patterns. A `.land-cta`
+  class sizes the hero/contact buttons up — `.btn-lg` was not usable there,
+  since it sets `width:100%`, which stacks side-by-side buttons instead of
+  sitting them in a row.
+- "Why families choose us" deliberately promotes real, already-built
+  product decisions (credits that never expire, points for effort,
+  parent-visible progress tracking) rather than generic marketing filler —
+  they're genuine differentiators, not invented ones.
+- The auth gate gained a small `.gate-back` link ("‹ Back to
+  bellcurveclub.com") so the flow isn't one-way.
+- The contact section's `mailto:hello@bellcurveclub.com` is a placeholder
+  address, flagged as such — there was no real inbox to confirm.
 
 **Next, in order:**
 

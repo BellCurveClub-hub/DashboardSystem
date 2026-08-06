@@ -699,16 +699,35 @@ async function runGate() {
     },
   });
   await new Promise(r => setTimeout(r, 350));
-  const card = dom.window.document.querySelector(".gate-card");
+  const w = dom.window;
+
+  // default (no hash) — the marketing landing page, not the sign-in form
+  const land = w.document.querySelector(".land");
+  const landTxt = land ? land.textContent : "";
+  const results = [
+    (land ? "  ok   " : "  FAIL ") + "landing page renders for a signed-out visitor with no hash",
+    (/on the right side of the curve/.test(landTxt) ? "  ok   " : "  FAIL ") + "landing page shows the tagline",
+    (land && land.querySelector('a[href="#/login"]') ? "  ok   " : "  FAIL ") + "landing page links to #/login",
+    (land && land.querySelectorAll(".land-card").length >= 5 ? "  ok   " : "  FAIL ") + "landing page lists subjects and reasons to choose the centre",
+  ];
+
+  // #/login — the actual sign-in gate
+  w.location.hash = "#/login";
+  await w.eval("render()");
+  await new Promise(r => setTimeout(r, 60));
+  const card = w.document.querySelector(".gate-card");
   const txt = card ? card.textContent : "";
-  const svg = dom.window.document.querySelector(".gate-card svg.brandmark");
-  dom.window.close();
-  return [
-    (card ? "  ok   " : "  FAIL ") + "sign-in screen renders",
+  const svg = w.document.querySelector(".gate-card svg.brandmark");
+  results.push(
+    (card ? "  ok   " : "  FAIL ") + "sign-in screen renders at #/login",
     (/on the right side of the curve/.test(txt) ? "  ok   " : "  FAIL ") + "slogan under the wordmark",
     (/bell curve club/i.test(txt) ? "  ok   " : "  FAIL ") + "wordmark reads Bell Curve Club",
     (svg ? "  ok   " : "  FAIL ") + "bell curve mark drawn as SVG",
-  ];
+    (card && card.querySelector('a[href="#/"]') ? "  ok   " : "  FAIL ") + "sign-in screen links back to the landing page"
+  );
+
+  w.close();
+  return results;
 }
 
 (async () => {
