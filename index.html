@@ -378,13 +378,16 @@ table.tbl tr[draggable="true"]:active .drag-handle{cursor:grabbing}
 .attn-row:last-child{border-bottom:0}
 .attn-row-head{
   width:100%; display:flex; align-items:center; gap:10px;
-  padding:11px 4px; border:0; background:transparent; cursor:pointer; text-align:left; font-size:14px;
+  padding:12px 18px; border:0; background:transparent; cursor:pointer; text-align:left; font-size:14px;
 }
 .attn-row-head:hover{background:var(--cream)}
 .attn-row-summary{flex:1; display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:0}
 .attn-row-head .attn-chevron{color:var(--ink-faint); transition:transform .15s; flex:0 0 auto}
 .attn-row-head[aria-expanded="true"] .attn-chevron{transform:rotate(90deg)}
-.attn-row-body{padding:0 4px 12px}
+.attn-row-body{padding:0 18px 16px}
+.recent-row{display:flex; gap:14px; align-items:baseline; padding:9px 0; border-bottom:1px solid #F1ECE1}
+.recent-row:last-child{border-bottom:0}
+.recent-row .when{flex:0 0 128px; color:var(--ink-soft); font-size:12.5px; white-space:nowrap}
 
 /* ============================================================
    SCHEDULE
@@ -2768,6 +2771,13 @@ function fmtTime(t) {
   return h + (m === "00" ? "" : "." + m) + ap;
 }
 function fmtRange(a, b) { return fmtTime(a) + "–" + fmtTime(b); }
+function fmtDateTime(dstr) {
+  if (!dstr) return "";
+  const d = new Date(dstr);
+  if (isNaN(d)) return esc(dstr);
+  const hh = String(d.getHours()).padStart(2, "0"), mm = String(d.getMinutes()).padStart(2, "0");
+  return fmtDate(String(dstr).slice(0, 10)) + ", " + fmtTime(hh + ":" + mm);
+}
 function initials(name) {
   return String(name || "?").trim().split(/\s+/).slice(0, 2).map(w => w[0] || "").join("").toUpperCase() || "?";
 }
@@ -3639,7 +3649,7 @@ async function overviewAttentionTab() {
   return stats +
     (Number(state.settings.notifications_email) !== 1
       ? '<div class="note">Email sending is off — turn it on in Settings once the notification function is deployed, and Send buttons appear here.</div>' : "") +
-    (waiting.length ? card("Waiting on you", "<ul style='margin:0;padding-left:18px;line-height:1.9'>" + waiting.join("") + "</ul>", "", true) : "") +
+    (waiting.length ? card("Waiting on you", "<ul style='margin:0;padding:16px 18px 16px 34px;line-height:1.9'>" + waiting.join("") + "</ul>", "", true) : "") +
     card("Running low on credits (" + lowCredit.length + ")",
       lowCreditRows || emptyState("✓", "Nobody's low", "Every active student has enough credits."), "", true) +
     card("Awaiting payment (" + awaiting.length + (overdue.length ? " · " + overdue.length + " overdue" : "") + ")",
@@ -3683,9 +3693,10 @@ async function recentActionsHTML(smap) {
   if (!top.length) return emptyState("◷", "Nothing yet", "Actions across the centre show up here as they happen.");
   const anyTableFull = [credits, points, invoices, bookings, redemptions, attendance, reports].some(arr => arr.length >= fetchLimit);
   const hasMore = dated.length > top.length || anyTableFull;
-  return "<ul style='margin:0;padding-left:18px;line-height:2'>" +
-    top.map(x => "<li>" + x.text + " <span class='hint'>" + esc(fmtDate(x.when.slice(0, 10))) + "</span></li>").join("") + "</ul>" +
-    loadMoreHTML("recentActionsLimit", 12, hasMore);
+  return '<div style="padding:6px 18px 14px">' +
+    top.map(x => '<div class="recent-row"><span class="when">' + esc(fmtDateTime(x.when)) + "</span><span>" + x.text + "</span></div>").join("") +
+    (hasMore ? loadMoreHTML("recentActionsLimit", 12, hasMore) : "") +
+    "</div>";
 }
 
 async function overviewFinancialTab() {
@@ -4262,7 +4273,7 @@ ADMIN.announcements = async function (view) {
         (targets.length ? "Sent to " + targets.map(c => esc(c.name)).join(", ") : "Sent to every family") + "</p>" +
       "<p style='margin:0;white-space:pre-wrap'>" + esc(a.body) + "</p>",
       '<button class="btn btn-sm btn-ghost" data-act="announcement-edit" data-id="' + a.id + '">Edit</button> ' +
-      '<button class="btn btn-sm btn-danger" data-act="announcement-delete" data-id="' + a.id + '">Delete</button>', true);
+      '<button class="btn btn-sm btn-danger" data-act="announcement-delete" data-id="' + a.id + '">Delete</button>');
   }).join("");
 
   view.innerHTML =
@@ -4326,7 +4337,7 @@ function announcementsBannerHTML(anns) {
       "<div style='margin-bottom:14px'><div style='display:flex;justify-content:space-between;gap:10px'><b>" + esc(a.title) +
       "</b><span class='hint'>" + esc(fmtDate(a.created_at.slice(0, 10))) + "</span></div>" +
       "<p style='margin:4px 0 0;white-space:pre-wrap'>" + esc(a.body) + "</p></div>").join("") +
-    (anns.length > 3 ? '<a href="#/announcements">See all announcements</a>' : ""), "", true);
+    (anns.length > 3 ? '<a href="#/announcements">See all announcements</a>' : ""));
 }
 async function familyAnnouncementsPage(view) {
   const anns = await familyAnnouncements(state.announcementsLimit);
@@ -4334,7 +4345,7 @@ async function familyAnnouncementsPage(view) {
     pageHead("Announcements", "Notices from the centre") +
     (anns.length
       ? anns.map(a => card(a.title, "<p class='hint' style='margin:0 0 8px'>" + esc(fmtDate(a.created_at.slice(0, 10))) + "</p>" +
-          "<p style='margin:0;white-space:pre-wrap'>" + esc(a.body) + "</p>", "", true)).join("") +
+          "<p style='margin:0;white-space:pre-wrap'>" + esc(a.body) + "</p>")).join("") +
         loadMoreHTML("announcementsLimit", 20, anns.length >= state.announcementsLimit)
       : card("", emptyState("▣", "Nothing yet", "Notices from the centre appear here.")));
 }
