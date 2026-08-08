@@ -5136,7 +5136,8 @@ function topicsSubjectBlockHTML(s) {
   const { topics, levels, streams } = state.cache.topicsData;
   const lvMap = byId(levels), stMap = byId(streams);
   const list = topics.filter(t => t.subject_id === s.id);
-  const editSubjBtn = '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ';
+  const editSubjBtn = '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ' +
+    '<button class="btn btn-sm btn-danger" data-act="subject-del" data-id="' + s.id + '">Delete</button> ';
   if (!list.length) {
     return card(s.name, emptyState("◈", "No topics under " + s.name, "Add the chapters you want to score students on."),
       editSubjBtn + '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '">Add a topic</button>', true);
@@ -7073,6 +7074,14 @@ const ACTIONS = {
   "class-edit": el => classForm(el.dataset.id || null),
   "subject-add": () => subjectForm(),
   "subject-edit": el => subjectForm(el.dataset.id),
+  "subject-del": async el => {
+    const ok = await confirmBox("Delete this subject?",
+      "Every topic under it, and any mastery or grading history tied to those topics, goes too. " +
+      "Classes, packages and test results already using it stay, but lose their subject link.", true);
+    if (!ok) return;
+    try { await del("subjects", el.dataset.id); toast("Subject deleted.", "ok"); render(); }
+    catch (e) { fail(e); }
+  },
   "package-edit": el => packageForm(el.dataset.id || null),
   "topic-edit": el => topicForm(el.dataset.id || null, el.dataset.subject || null, el.dataset.level || null, el.dataset.stream || null),
   "topics-level-tab": el => { state.topicsLevelTab[el.dataset.subject] = el.dataset.key; rerenderTopicsCard(el.dataset.subject); },

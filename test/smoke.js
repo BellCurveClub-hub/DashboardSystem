@@ -618,6 +618,14 @@ async function runRole(roleName, userId, empty) {
       check("subject edit form prefills the name", !!nameField && nameField.value === "Mathematics");
       w.document.querySelector('[data-act="modal-close"]').click();
     }
+    const subjDelBtn = w.document.querySelector('[data-act="subject-del"]');
+    check("subject delete button renders", !!subjDelBtn);
+    if (subjDelBtn) {
+      subjDelBtn.click();
+      await new Promise(r => setTimeout(r, 100));
+      check("subject delete asks for confirmation first", !!w.document.querySelector(".modal"));
+      w.document.querySelector('[data-act="modal-close"]').click();
+    }
     w.location.hash = "#/schedule"; await w.eval("render()"); await new Promise(r => setTimeout(r, 90));
     check("admin still sees every class",
       /Someone else/.test(w.document.querySelector("#view").textContent));
