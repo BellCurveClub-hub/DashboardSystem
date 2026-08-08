@@ -2714,6 +2714,7 @@ const state = {
   settings: {},
   phoneCodeSent: false,
   progressSubject: "all",
+  topicsLevelTab: {},
   pendingConfirmEmail: null,
   // "load more" caps for lists that would otherwise run long — bumped by
   // the load-more action, never reset until the next full page load
@@ -5095,18 +5096,52 @@ ADMIN.topics = async function (view) {
     sel("levels", q => q.order("sort_order")), sel("streams", q => q.order("sort_order")),
   ]);
   const lvMap = byId(levels), stMap = byId(streams);
+
   const blocks = subjects.map(s => {
     const list = topics.filter(t => t.subject_id === s.id);
-    return card(s.name, list.length
-      ? table(["#", "Topic", "Level", "Stream", ""], list.map(t =>
-          '<tr><td class="num">' + t.sort_order + "</td><td><b>" + esc(t.name) + "</b></td>" +
-          "<td>" + esc(nameOf(lvMap, t.level_id, "Any level")) + "</td>" +
-          "<td>" + esc(nameOf(stMap, t.stream_id, "Any stream")) + "</td>" +
-          '<td class="act"><button class="btn btn-sm btn-ghost" data-act="topic-edit" data-id="' + t.id + '">Edit</button> ' +
-          '<button class="btn btn-sm btn-danger" data-act="topic-del" data-id="' + t.id + '">Delete</button></td></tr>'))
-      : emptyState("◈", "No topics under " + s.name, "Add the chapters you want to score students on."),
-      '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ' +
-      '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '">Add a topic</button>', true);
+    if (!list.length) {
+      return card(s.name, emptyState("◈", "No topics under " + s.name, "Add the chapters you want to score students on."),
+        '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ' +
+        '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '">Add a topic</button>', true);
+    }
+
+    // one tab per level that actually has a topic under this subject, in
+    // level order, plus a trailing "Any level" tab for topics with no
+    // level set — skipped entirely when everything sits under one tab,
+    // same idea as Progress's subject tabs hiding for a single-subject
+    // student
+    const seenLevels = [];
+    list.forEach(t => { if (t.level_id && !seenLevels.includes(t.level_id)) seenLevels.push(t.level_id); });
+    const tabs = levels.filter(l => seenLevels.includes(l.id)).map(l => ({ key: l.id, label: l.name }));
+    if (list.some(t => !t.level_id)) tabs.push({ key: "__any__", label: "Any level" });
+
+    const tabbed = tabs.length > 1;
+    const activeKey = tabbed
+      ? (tabs.some(x => x.key === state.topicsLevelTab[s.id]) ? state.topicsLevelTab[s.id] : tabs[0].key)
+      : null;
+    const shown = tabbed ? list.filter(t => (t.level_id || "__any__") === activeKey) : list;
+
+    const tabsHTML = tabbed
+      ? '<div class="tabs-seg" role="tablist" style="margin-bottom:14px">' +
+          tabs.map(x => '<button role="tab" aria-selected="' + (x.key === activeKey) + '" data-act="topics-level-tab" data-subject="' + s.id +
+            '" data-key="' + esc(x.key) + '">' + esc(x.label) + '</button>').join("") + "</div>"
+      : "";
+
+    const headers = tabbed ? ["#", "Topic", "Stream", ""] : ["#", "Topic", "Level", "Stream", ""];
+    const rows = shown.map(t => '<tr><td class="num">' + t.sort_order + "</td><td><b>" + esc(t.name) + "</b></td>" +
+      (tabbed ? "" : "<td>" + esc(nameOf(lvMap, t.level_id, "Any level")) + "</td>") +
+      "<td>" + esc(nameOf(stMap, t.stream_id, "Any stream")) + "</td>" +
+      '<td class="act"><button class="btn btn-sm btn-ghost" data-act="topic-edit" data-id="' + t.id + '">Edit</button> ' +
+      '<button class="btn btn-sm btn-danger" data-act="topic-del" data-id="' + t.id + '">Delete</button></td></tr>');
+
+    // "Add a topic" carries the active tab's level through, so adding one
+    // while looking at Sec 3 defaults the new topic's level to Sec 3
+    // instead of blank
+    const addBtn = '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '"' +
+      (tabbed && activeKey !== "__any__" ? ' data-level="' + activeKey + '"' : "") + '">Add a topic</button>';
+
+    return card(s.name, tabsHTML + table(headers, rows),
+      '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ' + addBtn, true);
   }).join("");
 
   // levels and streams reorder by dragging the row (persisted straight to
@@ -5134,7 +5169,7 @@ ADMIN.topics = async function (view) {
     (subjects.length ? blocks : card("", emptyState("◈", "No subjects yet", "Add a subject first.")));
 };
 
-async function topicForm(id, subjectId) {
+async function topicForm(id, subjectId, levelId) {
   const t = id ? (await sel("topics", q => q.eq("id", id)))[0] : null;
   const [subjects, levels, streams] = await Promise.all([
     sel("subjects", q => q.order("name")), sel("levels", q => q.order("sort_order")), sel("streams", q => q.order("sort_order")),
@@ -5145,7 +5180,7 @@ async function topicForm(id, subjectId) {
       fSelect("subject_id", "Subject", t ? t.subject_id : subjectId || "", subjects.map(s => ({ value: s.id, label: s.name }))) +
       fText("name", "Topic", t ? t.name : "", { required: true, placeholder: "Quadratic equations" }) +
       '<div class="grid-3">' +
-        fSelect("level_id", "Level", t ? t.level_id : "", levels.map(l => ({ value: l.id, label: l.name })), { blank: "Any level" }) +
+        fSelect("level_id", "Level", t ? t.level_id : (levelId || ""), levels.map(l => ({ value: l.id, label: l.name })), { blank: "Any level" }) +
         fSelect("stream_id", "Stream", t ? t.stream_id : "", streams.map(s => ({ value: s.id, label: s.name })), { blank: "Any stream" }) +
         fText("sort_order", "Order", t ? t.sort_order : 0, { type: "number" }) +
       "</div>",
@@ -6996,7 +7031,8 @@ const ACTIONS = {
   "subject-add": () => subjectForm(),
   "subject-edit": el => subjectForm(el.dataset.id),
   "package-edit": el => packageForm(el.dataset.id || null),
-  "topic-edit": el => topicForm(el.dataset.id || null, el.dataset.subject || null),
+  "topic-edit": el => topicForm(el.dataset.id || null, el.dataset.subject || null, el.dataset.level || null),
+  "topics-level-tab": el => { state.topicsLevelTab[el.dataset.subject] = el.dataset.key; render(); },
   "topic-del": async el => {
     if (!(await confirmBox("Delete this topic?", "Any scores recorded against it go too.", true))) return;
     try { await del("topics", el.dataset.id); toast("Topic deleted.", "ok"); render(); } catch (e) { fail(e); }
