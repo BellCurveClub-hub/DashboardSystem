@@ -2715,6 +2715,7 @@ const state = {
   phoneCodeSent: false,
   progressSubject: "all",
   topicsLevelTab: {},
+  topicsStreamTab: {},
   pendingConfirmEmail: null,
   // "load more" caps for lists that would otherwise run long — bumped by
   // the load-more action, never reset until the next full page load
@@ -5095,54 +5096,11 @@ ADMIN.topics = async function (view) {
     sel("topics", q => q.order("sort_order")), sel("subjects", q => q.order("name")),
     sel("levels", q => q.order("sort_order")), sel("streams", q => q.order("sort_order")),
   ]);
-  const lvMap = byId(levels), stMap = byId(streams);
+  // stashed so the level/stream tab clicks below can redraw just one
+  // subject's card from data already in hand, instead of a full render()
+  state.cache.topicsData = { topics, subjects, levels, streams };
 
-  const blocks = subjects.map(s => {
-    const list = topics.filter(t => t.subject_id === s.id);
-    if (!list.length) {
-      return card(s.name, emptyState("◈", "No topics under " + s.name, "Add the chapters you want to score students on."),
-        '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ' +
-        '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '">Add a topic</button>', true);
-    }
-
-    // one tab per level that actually has a topic under this subject, in
-    // level order, plus a trailing "Any level" tab for topics with no
-    // level set — skipped entirely when everything sits under one tab,
-    // same idea as Progress's subject tabs hiding for a single-subject
-    // student
-    const seenLevels = [];
-    list.forEach(t => { if (t.level_id && !seenLevels.includes(t.level_id)) seenLevels.push(t.level_id); });
-    const tabs = levels.filter(l => seenLevels.includes(l.id)).map(l => ({ key: l.id, label: l.name }));
-    if (list.some(t => !t.level_id)) tabs.push({ key: "__any__", label: "Any level" });
-
-    const tabbed = tabs.length > 1;
-    const activeKey = tabbed
-      ? (tabs.some(x => x.key === state.topicsLevelTab[s.id]) ? state.topicsLevelTab[s.id] : tabs[0].key)
-      : null;
-    const shown = tabbed ? list.filter(t => (t.level_id || "__any__") === activeKey) : list;
-
-    const tabsHTML = tabbed
-      ? '<div class="tabs-seg" role="tablist" style="margin-bottom:14px">' +
-          tabs.map(x => '<button role="tab" aria-selected="' + (x.key === activeKey) + '" data-act="topics-level-tab" data-subject="' + s.id +
-            '" data-key="' + esc(x.key) + '">' + esc(x.label) + '</button>').join("") + "</div>"
-      : "";
-
-    const headers = tabbed ? ["#", "Topic", "Stream", ""] : ["#", "Topic", "Level", "Stream", ""];
-    const rows = shown.map(t => '<tr><td class="num">' + t.sort_order + "</td><td><b>" + esc(t.name) + "</b></td>" +
-      (tabbed ? "" : "<td>" + esc(nameOf(lvMap, t.level_id, "Any level")) + "</td>") +
-      "<td>" + esc(nameOf(stMap, t.stream_id, "Any stream")) + "</td>" +
-      '<td class="act"><button class="btn btn-sm btn-ghost" data-act="topic-edit" data-id="' + t.id + '">Edit</button> ' +
-      '<button class="btn btn-sm btn-danger" data-act="topic-del" data-id="' + t.id + '">Delete</button></td></tr>');
-
-    // "Add a topic" carries the active tab's level through, so adding one
-    // while looking at Sec 3 defaults the new topic's level to Sec 3
-    // instead of blank
-    const addBtn = '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '"' +
-      (tabbed && activeKey !== "__any__" ? ' data-level="' + activeKey + '"' : "") + '">Add a topic</button>';
-
-    return card(s.name, tabsHTML + table(headers, rows),
-      '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ' + addBtn, true);
-  }).join("");
+  const blocks = subjects.map(s => '<div id="topics-card-' + s.id + '">' + topicsSubjectBlockHTML(s) + "</div>").join("");
 
   // levels and streams reorder by dragging the row (persisted straight to
   // sort_order on drop); topics keep a plain typed-in Order number instead
@@ -5169,7 +5127,92 @@ ADMIN.topics = async function (view) {
     (subjects.length ? blocks : card("", emptyState("◈", "No subjects yet", "Add a subject first.")));
 };
 
-async function topicForm(id, subjectId, levelId) {
+// Redraws one subject's card from state.cache.topicsData (set by
+// ADMIN.topics on page load) rather than a full render() — a level or
+// stream tab click only ever changes what's shown inside this one card,
+// so there's no reason to rebuild the whole page (and lose scroll
+// position) for it.
+function topicsSubjectBlockHTML(s) {
+  const { topics, levels, streams } = state.cache.topicsData;
+  const lvMap = byId(levels), stMap = byId(streams);
+  const list = topics.filter(t => t.subject_id === s.id);
+  const editSubjBtn = '<button class="btn btn-sm btn-ghost" data-act="subject-edit" data-id="' + s.id + '">Edit</button> ';
+  if (!list.length) {
+    return card(s.name, emptyState("◈", "No topics under " + s.name, "Add the chapters you want to score students on."),
+      editSubjBtn + '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '">Add a topic</button>', true);
+  }
+
+  // one tab per level that actually has a topic under this subject, in
+  // level order, plus a trailing "Any level" tab for topics with no level
+  // set — skipped entirely when everything sits under one tab, same idea
+  // as Progress's subject tabs hiding for a single-subject student
+  const seenLevels = [];
+  list.forEach(t => { if (t.level_id && !seenLevels.includes(t.level_id)) seenLevels.push(t.level_id); });
+  const levelTabs = levels.filter(l => seenLevels.includes(l.id)).map(l => ({ key: l.id, label: l.name }));
+  if (list.some(t => !t.level_id)) levelTabs.push({ key: "__any__", label: "Any level" });
+  const levelTabbed = levelTabs.length > 1;
+  const activeLevel = levelTabbed
+    ? (levelTabs.some(x => x.key === state.topicsLevelTab[s.id]) ? state.topicsLevelTab[s.id] : levelTabs[0].key)
+    : null;
+  const afterLevel = levelTabbed ? list.filter(t => (t.level_id || "__any__") === activeLevel) : list;
+
+  // a second row of tabs, scoped to whichever level is active above, for
+  // narrowing to one stream — "All streams" first, then whichever streams
+  // actually appear here, an "Any stream" tab last for the un-streamed
+  // ones. Skipped when there's nothing to narrow (every topic here is the
+  // same one stream, or all "any stream")
+  const seenStreams = [];
+  afterLevel.forEach(t => { const k = t.stream_id || "__any__"; if (!seenStreams.includes(k)) seenStreams.push(k); });
+  const streamTabs = seenStreams.length > 1
+    ? [{ key: "__all__", label: "All streams" }]
+        .concat(streams.filter(st => seenStreams.includes(st.id)).map(st => ({ key: st.id, label: st.name })))
+        .concat(seenStreams.includes("__any__") ? [{ key: "__any__", label: "Any stream" }] : [])
+    : [];
+  const streamTabbed = streamTabs.length > 1;
+  const activeStream = streamTabbed
+    ? (streamTabs.some(x => x.key === state.topicsStreamTab[s.id]) ? state.topicsStreamTab[s.id] : streamTabs[0].key)
+    : null;
+  const shown = streamTabbed && activeStream !== "__all__"
+    ? afterLevel.filter(t => (t.stream_id || "__any__") === activeStream)
+    : afterLevel;
+
+  const tabRow = (tabs, active, act) => '<div class="tabs-seg" role="tablist" style="margin-bottom:10px">' +
+    tabs.map(x => '<button role="tab" aria-selected="' + (x.key === active) + '" data-act="' + act + '" data-subject="' + s.id +
+      '" data-key="' + esc(x.key) + '">' + esc(x.label) + '</button>').join("") + "</div>";
+  const tabsHTML = (levelTabbed ? tabRow(levelTabs, activeLevel, "topics-level-tab") : "") +
+    (streamTabbed ? tabRow(streamTabs, activeStream, "topics-stream-tab") : "");
+
+  const showLevelCol = !levelTabbed;
+  const showStreamCol = !(streamTabbed && activeStream !== "__all__");
+  const headers = ["#", "Topic"].concat(showLevelCol ? ["Level"] : []).concat(showStreamCol ? ["Stream"] : []).concat([""]);
+  const rows = shown.map(t => '<tr><td class="num">' + t.sort_order + "</td><td><b>" + esc(t.name) + "</b></td>" +
+    (showLevelCol ? "<td>" + esc(nameOf(lvMap, t.level_id, "Any level")) + "</td>" : "") +
+    (showStreamCol ? "<td>" + esc(nameOf(stMap, t.stream_id, "Any stream")) + "</td>" : "") +
+    '<td class="act"><button class="btn btn-sm btn-ghost" data-act="topic-edit" data-id="' + t.id + '">Edit</button> ' +
+    '<button class="btn btn-sm btn-danger" data-act="topic-del" data-id="' + t.id + '">Delete</button></td></tr>');
+
+  // "Add a topic" carries whichever level/stream tabs are active through,
+  // so adding one while looking at Sec 3 / H2 defaults the new topic to
+  // Sec 3 / H2 instead of blank
+  const addAttrs =
+    (levelTabbed && activeLevel !== "__any__" ? ' data-level="' + activeLevel + '"' : "") +
+    (streamTabbed && activeStream !== "__all__" && activeStream !== "__any__" ? ' data-stream="' + activeStream + '"' : "");
+  const addBtn = '<button class="btn btn-sm btn-mint" data-act="topic-edit" data-subject="' + s.id + '"' + addAttrs + '">Add a topic</button>';
+
+  return card(s.name, tabsHTML + table(headers, rows), editSubjBtn + addBtn, true);
+}
+
+// re-draws one subject's card in place; falls back to a full render() if
+// the cached data or the card's DOM node isn't there for some reason
+function rerenderTopicsCard(subjectId) {
+  const host = document.getElementById("topics-card-" + subjectId);
+  const data = state.cache.topicsData;
+  const s = data && data.subjects.find(x => x.id === subjectId);
+  if (!host || !s) return render();
+  host.innerHTML = topicsSubjectBlockHTML(s);
+}
+
+async function topicForm(id, subjectId, levelId, streamId) {
   const t = id ? (await sel("topics", q => q.eq("id", id)))[0] : null;
   const [subjects, levels, streams] = await Promise.all([
     sel("subjects", q => q.order("name")), sel("levels", q => q.order("sort_order")), sel("streams", q => q.order("sort_order")),
@@ -5181,7 +5224,7 @@ async function topicForm(id, subjectId, levelId) {
       fText("name", "Topic", t ? t.name : "", { required: true, placeholder: "Quadratic equations" }) +
       '<div class="grid-3">' +
         fSelect("level_id", "Level", t ? t.level_id : (levelId || ""), levels.map(l => ({ value: l.id, label: l.name })), { blank: "Any level" }) +
-        fSelect("stream_id", "Stream", t ? t.stream_id : "", streams.map(s => ({ value: s.id, label: s.name })), { blank: "Any stream" }) +
+        fSelect("stream_id", "Stream", t ? t.stream_id : (streamId || ""), streams.map(s => ({ value: s.id, label: s.name })), { blank: "Any stream" }) +
         fText("sort_order", "Order", t ? t.sort_order : 0, { type: "number" }) +
       "</div>",
     onSave: async () => {
@@ -7031,8 +7074,9 @@ const ACTIONS = {
   "subject-add": () => subjectForm(),
   "subject-edit": el => subjectForm(el.dataset.id),
   "package-edit": el => packageForm(el.dataset.id || null),
-  "topic-edit": el => topicForm(el.dataset.id || null, el.dataset.subject || null, el.dataset.level || null),
-  "topics-level-tab": el => { state.topicsLevelTab[el.dataset.subject] = el.dataset.key; render(); },
+  "topic-edit": el => topicForm(el.dataset.id || null, el.dataset.subject || null, el.dataset.level || null, el.dataset.stream || null),
+  "topics-level-tab": el => { state.topicsLevelTab[el.dataset.subject] = el.dataset.key; rerenderTopicsCard(el.dataset.subject); },
+  "topics-stream-tab": el => { state.topicsStreamTab[el.dataset.subject] = el.dataset.key; rerenderTopicsCard(el.dataset.subject); },
   "topic-del": async el => {
     if (!(await confirmBox("Delete this topic?", "Any scores recorded against it go too.", true))) return;
     try { await del("topics", el.dataset.id); toast("Topic deleted.", "ok"); render(); } catch (e) { fail(e); }
